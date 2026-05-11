@@ -1,0 +1,215 @@
+openapi: 3.0.3
+info:
+  title: TraceNexBiz partner-api admin
+  version: 0.1.0-w1c
+  description: |
+    W1c admin endpoints (PRD §7.4 + backend §4.5). All endpoints require staff JWT
+    + IP allowlist + Audit middleware (mounted by router layer).
+
+servers:
+  - url: /api/admin
+
+tags:
+  - name: invoice
+  - name: ticket
+  - name: content_safety
+  - name: staff
+  - name: saga
+
+paths:
+  /invoice/{id}/review:
+    post:
+      tags: [invoice]
+      summary: 发票审核（finance_admin）
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approve]
+              properties:
+                approve: { type: boolean }
+                reject_code: { type: string }
+                reject_text: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+  /invoice/{id}/issue:
+    post:
+      tags: [invoice]
+      summary: 全电发票出票
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+  /invoice/{id}/red-flush:
+    post:
+      tags: [invoice]
+      summary: 发票红冲（M8 / Compliance MED-17）
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason_code]
+              properties:
+                reason_code: { type: string }
+                reason_text: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+  /tickets:
+    get:
+      tags: [ticket]
+      summary: 工单 drill-down 列表
+      parameters:
+        - name: opener_type
+          in: query
+          schema: { type: string, enum: [partner, customer, staff] }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: category
+          in: query
+          schema: { type: string, enum: [billing, kyc, api, content_report, other] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+  /tickets/{id}/assign:
+    post:
+      tags: [ticket]
+      summary: 工单分派（cs_admin）
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [staff_id]
+              properties:
+                staff_id: { type: integer, format: int64 }
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+  /content-safety/reports:
+    get:
+      tags: [content_safety]
+      summary: 12377 上报队列
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+  /content-safety/reports/{id}/retry:
+    post:
+      tags: [content_safety]
+      summary: 重试单条上报
+      parameters: [{ $ref: '#/components/parameters/IdPath' }]
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+  /content-safety/reports/dispatch:
+    post:
+      tags: [content_safety]
+      summary: 一键派发 pending（cron 也调）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { batch: { type: integer, default: 50 } }
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+  /staff:
+    post:
+      tags: [staff]
+      summary: 创建 staff（super_admin only + IP 白名单）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password_hash, role]
+              properties:
+                username: { type: string }
+                password_hash: { type: string }
+                role:
+                  type: string
+                  enum: [super_admin, risk_admin, finance_admin, cs_admin, kyc_reviewer]
+                email: { type: string, format: email }
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+  /saga/{id}/force-resolve:
+    post:
+      tags: [saga]
+      summary: dual-control force_resolve（PRD-PATCH-1）
+      description: |
+        严格约束：
+          - 不同人：approver_token 由 second approver 颁发
+          - 不同 /24 子网：initiator_ip 与 approver_ip
+          - 一次性 token：5min TTL，单次使用
+          - 30min cooldown：每个 saga_id 最多每 30min 一次
+          - 全程 audit_log：'saga.force_resolve' action
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approver_token, approver_ip, outcome]
+              properties:
+                approver_token: { type: string }
+                approver_ip: { type: string }
+                outcome: { type: string, enum: [resolved, compensated] }
+                reason: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Envelope' }
+
+components:
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+
+  responses:
+    Envelope:
+      description: standard envelope
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [success]
+            properties:
+              success: { type: boolean }
+              data: {}
+              error:
+                type: object
+                nullable: true
+                properties:
+                  code: { type: string }
+                  message_zh: { type: string }
+                  message_en: { type: string }
+                  trace_id: { type: string }

@@ -1,0 +1,19 @@
+{
+  "app.title": "TraceNex Partner",
+  "common.loading": "Loading...",
+  "common.cancel": "Cancel",
+  "common.confirm": "Confirm",
+  "common.save": "Save",
+  "common.delete": "Delete",
+  "errors.unknown": "Unknown error, please retry",
+  "errors.not_found": "Resource not found",
+  "errors.perm.forbidden": "Forbidden",
+  "errors.auth.jwt_revoked": "Session expired, please re-login",
+  "errors.idem.reused": "Request changed, please re-submit",
+  "errors.wallet.insufficient": "Insufficient available balance",
+  "errors.pricing.overlap": "Pricing window overlaps",
+  "errors.saga.unknown": "Confirming result, please check back",
+  "errors.fyapi.unknown": "Upstream error, please retry",
+  "errors.kyc.rejected": "KYC application rejected",
+  "errors.valid.amount_range": "Amount out of allowed range"
+}

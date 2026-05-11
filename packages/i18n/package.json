@@ -1,0 +1,21 @@
+{
+  "name": "@tnbiz/i18n",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "echo 'i18n bundle: type-check only'",
+    "lint": "echo 'TODO(W1e): eslint'",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'TODO(W1e): vitest'"
+  },
+  "dependencies": {
+    "i18next": "23.16.5",
+    "react-i18next": "15.1.1"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4"
+  }
+}

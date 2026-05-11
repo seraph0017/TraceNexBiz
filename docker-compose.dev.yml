@@ -1,0 +1,81 @@
+# 本地开发依赖：MySQL 8 / Redis 7 / LocalStack（OSS 模拟）/ Mailhog
+# 用于 partner-api + 4 个前端 dev 联调；端口与 README 启动指引保持一致
+#
+# 启动：docker compose -f docker-compose.dev.yml up -d
+# 端口：
+#   MySQL          3306
+#   Redis          6379
+#   LocalStack     4566 (S3 API)
+#   Mailhog SMTP   1025
+#   Mailhog UI     8025
+#
+# partner-api：8080；web 站点：5173-5176（见各 vite.config.ts）
+
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: tnbiz-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_dev
+      MYSQL_DATABASE: partner_db
+      MYSQL_USER: tnbiz_app
+      MYSQL_PASSWORD: tnbiz_app
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-authentication-plugin=mysql_native_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - tnbiz-mysql-data:/var/lib/mysql
+      - ./scripts/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot_dev"]
+      interval: 10s
+      retries: 6
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: tnbiz-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    ports:
+      - "6379:6379"
+    volumes:
+      - tnbiz-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3.4
+    container_name: tnbiz-localstack
+    restart: unless-stopped
+    environment:
+      SERVICES: s3,sqs,ses
+      DEBUG: "0"
+      DEFAULT_REGION: cn-hangzhou
+    ports:
+      - "4566:4566"
+    volumes:
+      - tnbiz-localstack-data:/var/lib/localstack
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: tnbiz-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  tnbiz-mysql-data:
+  tnbiz-redis-data:
+  tnbiz-localstack-data:

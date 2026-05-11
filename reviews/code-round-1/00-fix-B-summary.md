@@ -1,0 +1,1 @@
+Fix-B 状态：HIGH-7 OTP 已改 crypto/rand 均匀 000000-999999；HIGH-8 backoff 已统一 2^attempt 秒；HIGH-4 allocate 补偿错误不再吞；HIGH-B10 transfer/erase 改 scoped repo；钱包超扣补测。改动：auth.go、saga.go/test、transfer.go、w1a_business.go、customer_test.go、saga_allocate/*。命令：go build ./...；go test ./... -race。担心：路由层 customer scope 仍待中间件最终注入 partner_id。

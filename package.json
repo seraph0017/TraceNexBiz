@@ -1,0 +1,24 @@
+{
+  "name": "tracenex-biz",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TraceNex Partner monorepo (storefront / customer / partner / admin)",
+  "scripts": {
+    "build": "pnpm -r --filter './apps/partner-web-*' build",
+    "dev": "pnpm -r --parallel --filter './apps/partner-web-*' dev",
+    "lint": "pnpm -r --filter './apps/partner-web-*' lint",
+    "typecheck": "pnpm -r --filter './apps/partner-web-*' typecheck",
+    "test": "pnpm -r --filter './apps/partner-web-*' test"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5",
+    "prettier": "3.2.5",
+    "@types/node": "20.12.7",
+    "openapi-typescript": "6.7.6"
+  },
+  "packageManager": "pnpm@9.0.6",
+  "engines": {
+    "node": ">=20.10.0",
+    "pnpm": ">=9.0.0"
+  }
+}

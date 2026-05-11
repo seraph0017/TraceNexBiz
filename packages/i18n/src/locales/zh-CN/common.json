@@ -1,0 +1,19 @@
+{
+  "app.title": "TraceNex Partner",
+  "common.loading": "加载中...",
+  "common.cancel": "取消",
+  "common.confirm": "确定",
+  "common.save": "保存",
+  "common.delete": "删除",
+  "errors.unknown": "未知错误，请稍后重试",
+  "errors.not_found": "资源不存在",
+  "errors.perm.forbidden": "权限不足",
+  "errors.auth.jwt_revoked": "登录已失效，请重新登录",
+  "errors.idem.reused": "请求已变更，请检查后重试",
+  "errors.wallet.insufficient": "可用余额不足",
+  "errors.pricing.overlap": "定价区间重叠",
+  "errors.saga.unknown": "正在确认结果，请稍后查看",
+  "errors.fyapi.unknown": "上游服务异常，请稍后再试",
+  "errors.kyc.rejected": "KYC 申请已驳回",
+  "errors.valid.amount_range": "金额超出允许范围"
+}

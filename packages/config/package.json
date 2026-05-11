@@ -1,0 +1,17 @@
+{
+  "name": "@tnbiz/config",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "lint": "echo 'TODO(W1e): eslint'",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'TODO(W1e): vitest'"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4"
+  }
+}

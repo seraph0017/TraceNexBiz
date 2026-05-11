@@ -1,0 +1,60 @@
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # 每周一 02:00 UTC（=10:00 Asia/Shanghai）跑全量
+    - cron: '0 2 * * 1'
+
+jobs:
+  go-vuln:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/partner-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+      - name: nancy (deps SCA)
+        run: |
+          go list -json -m all | docker run --rm -i sonatypecorp/nancy:latest sleuth || true
+
+  pnpm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: pnpm audit
+        run: pnpm audit --prod || true
+
+  sbom-cosign:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: install syft
+        uses: anchore/sbom-action/download-syft@v0
+      - name: SBOM (CycloneDX)
+        run: syft . -o cyclonedx-json=sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+      # TODO(ops): cosign 签名镜像在 release workflow（不在 CI），需要 OIDC + KMS。

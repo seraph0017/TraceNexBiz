@@ -1,0 +1,49 @@
+name: partner-web
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/partner-web-*/**"
+      - "packages/**"
+      - "package.json"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/partner-web.yml"
+  pull_request:
+    paths:
+      - "apps/partner-web-*/**"
+      - "packages/**"
+
+jobs:
+  lint-test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: typecheck
+        run: pnpm -r --filter './apps/partner-web-*' typecheck
+      - name: lint
+        run: pnpm -r --filter './apps/partner-web-*' lint
+      - name: test
+        run: pnpm -r --filter './apps/partner-web-*' test --if-present
+      - name: build
+        run: pnpm -r --filter './apps/partner-web-*' build
+      - name: Bundle budget check
+        # per frontend §14.1：W1e 实现实际预算检查
+        run: |
+          for app in apps/partner-web-*; do
+            if [ -d "$app/dist" ]; then
+              size=$(du -sk "$app/dist" | cut -f1)
+              echo "$app dist size = ${size}KB"
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: partner-web-dist
+          path: apps/partner-web-*/dist

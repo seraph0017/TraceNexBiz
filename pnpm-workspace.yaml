@@ -1,0 +1,9 @@
+packages:
+  - "apps/partner-web-storefront"
+  - "apps/partner-web-customer"
+  - "apps/partner-web-partner"
+  - "apps/partner-web-admin"
+  - "packages/ui-kit"
+  - "packages/api-client"
+  - "packages/i18n"
+  - "packages/config"

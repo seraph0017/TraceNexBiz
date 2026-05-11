@@ -1,0 +1,282 @@
+{
+  "app": {
+    "title": "TraceNex 客户中心",
+    "loading": "加载中…",
+    "empty": "暂无数据",
+    "back": "返回",
+    "save": "保存",
+    "cancel": "取消",
+    "submit": "提交",
+    "confirm": "确定",
+    "edit": "编辑",
+    "delete": "删除",
+    "search": "搜索",
+    "export": "导出",
+    "create": "新建",
+    "view": "查看",
+    "yes": "是",
+    "no": "否",
+    "data_as_of": "数据截至 {{ts}}"
+  },
+  "nav": {
+    "dashboard": "控制台",
+    "balance": "余额",
+    "topup": "充值",
+    "api_keys": "API Key",
+    "usage": "用量",
+    "kyc": "实名认证",
+    "tickets": "工单",
+    "invoice": "发票",
+    "switch_partner": "切换渠道商",
+    "orphan_notice": "渠道商终止公告",
+    "pipl_rights": "PIPL 权利",
+    "settings": "设置",
+    "consent": "授权管理",
+    "logout": "退出"
+  },
+  "auth": {
+    "login_title": "客户登录",
+    "handle": "邮箱 / 手机",
+    "password": "密码",
+    "otp": "动态口令（可选）",
+    "login": "登录",
+    "logout_all": "全设备登出",
+    "session_expired": "会话已过期，请重新登录",
+    "forgot": "忘记密码？",
+    "forgot_title": "找回密码",
+    "forgot_desc": "请输入注册邮箱，您将收到含验证 token 的邮件",
+    "forgot_sent": "如邮箱已注册，找回链接已发送",
+    "reset_title": "重置密码",
+    "reset_new": "新密码",
+    "reset_done": "密码已重置，请登录"
+  },
+  "dashboard": {
+    "balance": "账户余额",
+    "monthly_calls": "本月调用",
+    "monthly_cost": "本月消费",
+    "remaining_quota": "剩余额度",
+    "active_models": "活跃模型",
+    "trend": "近 30 天用量",
+    "shortcut_topup": "去充值",
+    "shortcut_keys": "管理 API Key",
+    "shortcut_invoice": "申请发票"
+  },
+  "balance": {
+    "title": "余额",
+    "current": "当前余额",
+    "currency": "币种",
+    "updated_at": "更新时间",
+    "topup_cta": "立即充值"
+  },
+  "topup": {
+    "title": "充值",
+    "amount": "充值金额（元）",
+    "submit": "去支付",
+    "redirect": "正在跳转到持牌方收银台…",
+    "processing": "支付处理中",
+    "pending_unknown": "已收到您的付款，正在确认到账",
+    "escalated": "支付未确认，已转人工处理（工单 #{{id}}）",
+    "funded": "充值成功，余额已更新",
+    "failed": "支付失败，请重试或联系客服",
+    "history": "充值历史"
+  },
+  "api_keys": {
+    "title": "API Key",
+    "intro": "API Key 用于访问 TraceNex OpenAI 兼容接口。Key 仅在创建时显示一次，请妥善保存。",
+    "name": "名称",
+    "prefix": "前缀",
+    "last_used": "最近使用",
+    "status": "状态",
+    "create": "创建 Key",
+    "raw_warn": "请立即复制，本对话框关闭后将无法再次查看",
+    "raw_label": "您的 API Key",
+    "copy": "复制",
+    "copied": "已复制",
+    "revoke": "吊销",
+    "revoke_confirm": "吊销后立即停止生效，是否继续？",
+    "no_partner_keys": "本页仅显示您本人的 Key；不展示渠道商维度 sk-key"
+  },
+  "usage": {
+    "title": "用量明细",
+    "filter_start": "起始日期",
+    "filter_end": "结束日期",
+    "filter_model": "模型",
+    "col_date": "日期",
+    "col_model": "模型",
+    "col_calls": "调用次数",
+    "col_prompt": "Prompt tokens",
+    "col_completion": "Completion tokens",
+    "col_cost": "费用",
+    "export_csv": "导出 CSV"
+  },
+  "kyc": {
+    "title": "实名认证",
+    "status_none": "未提交",
+    "status_submitted": "审核中",
+    "status_approved": "已通过",
+    "status_rejected": "被驳回",
+    "id_card": "身份证号",
+    "real_name": "真实姓名",
+    "phone": "手机号",
+    "submit": "提交审核",
+    "reject_reason": "驳回原因：{{reason}}"
+  },
+  "tickets": {
+    "title": "工单",
+    "create": "提交工单",
+    "subject": "主题",
+    "body": "描述",
+    "priority": "优先级",
+    "target": "处理方",
+    "target_platform": "平台客服",
+    "target_partner": "渠道商客服",
+    "status": "状态",
+    "reply": "回复",
+    "messages": "消息记录"
+  },
+  "orphan": {
+    "title": "渠道商终止通知",
+    "intro": "您当前所属的渠道商已于 {{at}} 终止合作，根据合规要求平台为您预留 30 天宽限期。",
+    "grace_until": "宽限期截止：{{ts}}",
+    "options_title": "请选择您的后续方案：",
+    "opt_adopt": "由平台代管（迁入直营）",
+    "opt_direct": "直接对接平台",
+    "opt_switch": "切换到其他渠道商",
+    "select_partner": "选择目标渠道商",
+    "confirm": "提交选择",
+    "submitted": "选择已提交"
+  },
+  "switch_partner": {
+    "title": "切换渠道商",
+    "intro": "切换后您与新渠道商重新建立计费关系，历史用量数据保留只读访问。",
+    "target": "目标渠道商",
+    "submit": "申请切换",
+    "list": "切换记录",
+    "confirm_step": "二次确认",
+    "confirm_btn": "我已知晓影响，确认切换"
+  },
+  "invoice": {
+    "title": "发票",
+    "apply": "申请发票",
+    "amount": "开票金额（元）",
+    "title_field": "发票抬头",
+    "tax_no": "税号",
+    "email": "接收邮箱",
+    "list": "发票列表",
+    "type_blue": "蓝字",
+    "type_red": "红字",
+    "status_applying": "申请中",
+    "status_issued": "已开具",
+    "status_rejected": "已驳回",
+    "status_red_flushed": "已红冲",
+    "red_flush": "申请红冲",
+    "red_flush_reason": "红冲原因",
+    "red_flush_reason_text": "原因详细说明",
+    "download_pdf": "下载 PDF"
+  },
+  "settings": {
+    "title": "设置",
+    "tab_profile": "基础",
+    "tab_notify": "通知",
+    "display_name": "昵称",
+    "preferred_locale": "界面语言",
+    "notify_email": "邮件通知",
+    "notify_inapp": "站内信通知"
+  },
+  "consent": {
+    "title": "授权管理",
+    "intro": "您可在此查看与撤回各类同意。撤回后部分功能可能受影响。",
+    "scope": "授权范围",
+    "granted_at": "签署时间",
+    "version": "条款版本",
+    "revoke": "撤回",
+    "revoke_confirm": "撤回后该业务能力将受限，是否继续？"
+  },
+  "pipl": {
+    "title": "PIPL 个人信息权利",
+    "intro": "依据《个人信息保护法》§44-§47，您有权请求查阅、可携带性、删除您的个人信息。",
+    "kind_export": "导出我的数据",
+    "kind_delete": "删除我的账户",
+    "kind_rectify": "更正信息",
+    "kind_portability": "可携带性",
+    "submit": "提交请求",
+    "reason": "原因（可选）",
+    "list": "我的请求",
+    "status_submitted": "已提交",
+    "status_processing": "处理中",
+    "status_completed": "已完成",
+    "status_rejected": "已驳回",
+    "download": "下载数据包"
+  },
+  "errors": {
+    "unknown": "未知错误，请稍后重试",
+    "network": "网络异常，请稍后重试",
+    "auth": {
+      "invalid": "账号或密码错误",
+      "mfa_required": "请完成 MFA 验证",
+      "jwt_revoked": "会话已失效，请重新登录",
+      "locked": "账号已锁定，请稍后再试"
+    },
+    "perm": {
+      "forbidden": "暂无权限"
+    },
+    "valid": {
+      "consent": "请先勾选所有同意条款",
+      "amount_range": "金额超出允许范围",
+      "invalid_input": "输入不合法"
+    },
+    "idem": {
+      "reused": "请求已在处理，请勿重复提交"
+    },
+    "ratelimit": "请求过于频繁，请稍后再试",
+    "partner": {
+      "email_dup": "邮箱已被占用",
+      "phone_dup": "手机号已被占用"
+    },
+    "kyc": {
+      "rejected": "KYC 被驳回",
+      "frozen_yearly": "KYC 年度冻结"
+    },
+    "not_found": "记录不存在",
+    "fyapi": {
+      "unknown": "上游服务异常，请稍后"
+    },
+    "wallet": {
+      "insufficient": "余额不足",
+      "hold_failed": "余额冻结失败"
+    },
+    "saga": {
+      "unknown": "正在确认结果",
+      "escalated": "已转人工处理"
+    },
+    "invitation": {
+      "exhausted": "邀请码已用完",
+      "revoked": "邀请码已失效"
+    },
+    "customer": {
+      "invitation_required": "客户注册必须使用邀请码"
+    },
+    "dispute": {
+      "window_closed": "已超过申诉窗口"
+    },
+    "ticket": {
+      "closed": "工单已关闭"
+    },
+    "pricing": {
+      "below_floor": "加价后价格低于平台底价"
+    }
+  },
+  "validation": {
+    "required": "必填",
+    "min": "至少 {{n}} 个字符",
+    "max": "至多 {{n}} 个字符",
+    "amount_min": "金额必须 ≥ {{n}}",
+    "amount_max": "金额必须 ≤ {{n}}",
+    "email": "邮箱格式不正确",
+    "phone": "手机号格式不正确"
+  },
+  "compliance": {
+    "footer": "京公网安备 11000000000000 号 · 京ICP备 2024000000 号 · 算法备案号 0000000000",
+    "pipl_consent_required": "继续使用即表示您同意《隐私政策》与《用户协议》"
+  }
+}

@@ -1,0 +1,64 @@
+name: partner-api
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/partner-api/**"
+      - ".github/workflows/partner-api.yml"
+  pull_request:
+    paths:
+      - "apps/partner-api/**"
+      - ".github/workflows/partner-api.yml"
+
+jobs:
+  lint-test-build:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: partner_db_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping" --health-interval=10s
+          --health-timeout=5s --health-retries=10
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping" --health-interval=5s
+          --health-timeout=3s --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: apps/partner-api/go.sum
+      - name: go vet
+        working-directory: apps/partner-api
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.59.0
+          working-directory: apps/partner-api
+          args: --timeout=5m --config=.golangci.yml
+      - name: BOLA scope analyzer (custom)
+        working-directory: apps/partner-api
+        run: |
+          # CI gate per overview I-3.2 / A-10：每个 router 必须引用 permission.X
+          # 占位 W1a 实现：grep -n "router.Handle\|router.GET\|router.POST" --include="*.go" -r internal/handler
+          echo "TODO(W1a): wire bola-scope-required golangci custom analyzer"
+      - name: Test (race)
+        working-directory: apps/partner-api
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: Build
+        working-directory: apps/partner-api
+        run: CGO_ENABLED=0 go build -o bin/partner-api ./cmd/server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: partner-api-binary
+          path: apps/partner-api/bin/partner-api

@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /apply-partner/draft
+
+Sitemap: https://partner.tracenex.cn/sitemap.xml
