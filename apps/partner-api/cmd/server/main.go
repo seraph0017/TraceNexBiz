@@ -35,12 +35,15 @@ import (
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/kms"
 	infraredis "github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/redis"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/middleware"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/repository/mysql"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/auth"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/customer"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/invitation"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/kyc"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/partner"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/wallet"
+
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -73,7 +76,7 @@ func main() {
 	_ = bizDB
 	_ = fyDB
 
-	router := buildRouter(cfg, rdb)
+	router := buildRouter(cfg, rdb, bizDB)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTP.Addr,
@@ -140,7 +143,7 @@ func mustBuildKMS(cfg *config.Config) kms.Service {
 //  4. r.GET("/healthz", ...)
 //  5. handler.RegisterW1aRoutes(r, ...)
 //  6. handler.RegisterTODORoutes(r)
-func buildRouter(cfg *config.Config, rdb *redis.Client) http.Handler {
+func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -203,7 +206,7 @@ func buildRouter(cfg *config.Config, rdb *redis.Client) http.Handler {
 	r.GET("/healthz/ready", handler.HealthzReady)
 
 	// W1a：auth / partner / customer / kyc / wallet / invitation。
-	handler.RegisterW1aRoutes(r, buildW1aDeps(cfg))
+	handler.RegisterW1aRoutes(r, buildW1aDeps(cfg, bizDB))
 
 	// TODO route 占位（per W0 验收）
 	handler.RegisterTODORoutes(r)
@@ -282,9 +285,9 @@ func (bolaLoggerFunc) LogAttempt(actorType string, actorID int64, scope, path st
 
 // buildW1aDeps 装配 W1a service。
 //
-// dev / W1a 阶段：所有依赖走 memory + stub；W1c 改为接 GORM repository / Redis revocation /
-// KMS / fyapi.Client。
-func buildW1aDeps(cfg *config.Config) handler.W1aDeps {
+// W1b：partner / customer / kyc / wallet / invitation 走 GORM repository（bizDB 必须非 nil；
+// nil 时 fail-fast 退回 memory 以避免 dev 启动失败）。auth 暂仍走 memory（W1c 再迁）。
+func buildW1aDeps(cfg *config.Config, bizDB *gorm.DB) handler.W1aDeps {
 	_ = cfg
 	authRepo := auth.NewMemoryRepo()
 	hasher := auth.SimpleHasher{Salt: "tnbiz-dev-salt"}
@@ -292,25 +295,46 @@ func buildW1aDeps(cfg *config.Config) handler.W1aDeps {
 	authSvc := auth.NewService(authRepo, auth.NewMemoryRevocation(), hasher,
 		signer, auth.NoopNotifier{}, auth.AlwaysConsented{}, auth.Options{})
 
-	invRepo := invitation.NewMemoryRepo()
+	// W1b：5 个 GORM repo（仅当 bizDB 已就绪；否则 fallback 到 memory 让 dev 起得来）。
+	var (
+		invRepo     invitation.Repository
+		custRepo    customer.Repository
+		partnerRepo partner.Repository
+		walletRepo  wallet.Repository
+		kycRepo     kyc.Repository
+	)
+	if bizDB != nil {
+		invRepo = mysql.NewInvitationRepository(bizDB)
+		custRepo = mysql.NewCustomerRepository(bizDB)
+		partnerRepo = mysql.NewPartnerRepository(bizDB)
+		walletRepo = mysql.NewWalletRepository(bizDB)
+		kycRepo = mysql.NewKYCRepository(bizDB)
+	} else {
+		log.Warn().Msg("bizDB unavailable; falling back to in-memory repos (dev/W0 only)")
+		invRepo = invitation.NewMemoryRepo()
+		custRepo = customer.NewMemoryRepo()
+		partnerRepo = partner.NewMemoryRepo()
+		walletRepo = wallet.NewMemoryRepo()
+		kycRepo = kyc.NewMemoryRepo()
+	}
+
 	invSvc := invitation.NewService(invRepo)
 
-	custRepo := customer.NewMemoryRepo()
 	custFy := customer.NewStubFyAPI()
 	custSvc := customer.NewService(custRepo, &invitationAdapter{svc: invSvc}, custFy)
 
 	partnerSvc := partner.NewService(
-		partner.NewMemoryRepo(),
+		partnerRepo,
 		partner.NewStubCrypto(),
 		partner.NewAlwaysFreshConsent(time.Now()),
 		invSvc,
 		custSvc,
 	)
 
-	walletSvc := wallet.NewService(wallet.NewMemoryRepo())
+	walletSvc := wallet.NewService(walletRepo)
 
 	kycSvc := kyc.NewService(
-		kyc.NewMemoryRepo(),
+		kycRepo,
 		kyc.NewStubCrypto(),
 		kyc.NewStubOCR(),
 		kyc.NewStubOSS(),

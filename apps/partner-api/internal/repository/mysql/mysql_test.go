@@ -6,8 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// 简易表名 / mapper 测试，作为 repository 层 sanity check。
-// W1a 引入 sqlmock / dockertest 后扩为完整 round-trip 测试。
+// 表名 sanity check（保留 W1a 的初版断言）。
 func TestPartnerTableName(t *testing.T) {
 	assert.Equal(t, "partner", partnerRow{}.TableName())
 }
