@@ -5,7 +5,13 @@
 // 本文件覆盖 PRD §8.1 / §8.10 partner + invitation_code。
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrInvalidTaxStatus 非 ValidTaxStatuses 集合内的写入值（Fix-C item 5）.
+var ErrInvalidTaxStatus = errors.New("domain: invalid tax_status (must be one of: individual / sole_proprietor / partnership / llc / corp)")
 
 // PartnerStatus 见 PRD §14.1。
 type PartnerStatus string
@@ -20,16 +26,44 @@ const (
 	PartnerStatusTerminated PartnerStatus = "terminated"
 )
 
-// TaxStatus v0.2 Compliance HIGH-1。
+// TaxStatus v0.2 Compliance HIGH-1（Fix-C item 5：5 枚举对齐 PRD §19）。
+//
+// 当前枚举（migration 015）：individual / sole_proprietor / partnership / llc / corp.
+// 旧枚举常量（individual_business / company / unknown）保留 const 仅为兼容历史代码读取；
+// 新写入路径必须经 ValidTaxStatus 校验，只接受 5 个有效值之一。
 type TaxStatus string
 
 const (
-	TaxIndividual         TaxStatus = "individual"
-	TaxSoleProprietor     TaxStatus = "sole_proprietor"
+	TaxIndividual     TaxStatus = "individual"
+	TaxSoleProprietor TaxStatus = "sole_proprietor"
+	TaxPartnership    TaxStatus = "partnership"
+	TaxLLC            TaxStatus = "llc"
+	TaxCorp           TaxStatus = "corp"
+
+	// Deprecated: kept for read-back of pre-migration rows; do NOT use for new writes.
 	TaxIndividualBusiness TaxStatus = "individual_business"
-	TaxCompany            TaxStatus = "company"
-	TaxUnknown            TaxStatus = "unknown"
+	// Deprecated.
+	TaxCompany TaxStatus = "company"
+	// Deprecated.
+	TaxUnknown TaxStatus = "unknown"
 )
+
+// ValidTaxStatuses 写入校验集合（migration 015 enum）.
+var ValidTaxStatuses = map[TaxStatus]struct{}{
+	TaxIndividual:     {},
+	TaxSoleProprietor: {},
+	TaxPartnership:    {},
+	TaxLLC:            {},
+	TaxCorp:           {},
+}
+
+// ValidateTaxStatus 写入路径调；返回 ErrInvalidTaxStatus 时调用方应拒绝.
+func ValidateTaxStatus(t TaxStatus) error {
+	if _, ok := ValidTaxStatuses[t]; !ok {
+		return ErrInvalidTaxStatus
+	}
+	return nil
+}
 
 // Partner 渠道商主体（PRD §8.1）。
 //

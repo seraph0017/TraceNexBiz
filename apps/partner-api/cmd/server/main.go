@@ -44,6 +44,7 @@ import (
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/kyc"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/partner"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/wallet"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/pkg/consent"
 
 	"gorm.io/gorm"
 )
@@ -228,6 +229,13 @@ func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB) http.Han
 	// W1a：auth / partner / customer / kyc / wallet / invitation。
 	handler.RegisterW1aRoutes(r, buildW1aDeps(cfg, bizDB))
 
+	// Fix-C CRIT-C1: public footer endpoint (合规公示).
+	var bizSettingRepo *mysql.BizSettingRepository
+	if bizDB != nil {
+		bizSettingRepo = mysql.NewBizSettingRepository(bizDB)
+	}
+	handler.RegisterPublicFooterRoute(r, bizSettingRepo, rdb)
+
 	// TODO route 占位（per W0 验收）
 	handler.RegisterTODORoutes(r)
 
@@ -342,6 +350,10 @@ func buildW1aDeps(cfg *config.Config, bizDB *gorm.DB) handler.W1aDeps {
 
 	custFy := customer.NewStubFyAPI()
 	custSvc := customer.NewService(custRepo, &invitationAdapter{svc: invSvc}, custFy)
+	// Fix-C P1-7：consent_text_version guard.
+	cv := consent.NewVersionGuard(cfg.BizSetting)
+	cv.SetDevMode(cfg.Env == config.EnvDev)
+	custSvc = custSvc.WithConsentVerifier(cv)
 
 	partnerSvc := partner.NewService(
 		partnerRepo,

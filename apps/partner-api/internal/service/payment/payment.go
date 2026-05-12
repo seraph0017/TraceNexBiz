@@ -34,6 +34,11 @@ var ErrAmountMismatch = errors.New("payment: amount mismatch")
 // ErrUnknown 上游 5xx / 超时；调用方进入 saga unknown 分支.
 var ErrUnknown = errors.New("payment: provider unknown state")
 
+// ErrMchIDMismatch ISV 模式 mch_id 反向断言失败：webhook payload 携带的 mch_id 与
+// 本 partner-api 实例配置的期望 mch_id 不符 → 拒绝处理（防 cross-mchid 重放，
+// Fix-C P1-4 / Compliance M-2）.
+var ErrMchIDMismatch = errors.New("payment: webhook mch_id reverse assertion failed")
+
 // TopupRequest 创建充值意图.
 type TopupRequest struct {
 	ActorType  string // partner / customer
@@ -61,6 +66,9 @@ type CallbackPayload struct {
 	PaidAt          time.Time
 	Raw             []byte
 	Signature       string
+	// MchID ISV 模式 mch_id（Fix-C P1-4）；webhook payload 中携带，service 反向断言
+	// = ExpectedMchID（biz_setting payment.platform_isv_mchid）→ 不符直接拒绝.
+	MchID string
 }
 
 // WithdrawRequest 提现指令（结算后 T+1 落账）.

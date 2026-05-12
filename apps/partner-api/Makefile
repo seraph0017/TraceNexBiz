@@ -23,6 +23,33 @@ build: ## 编译 partner-api 二进制
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 go build -trimpath -o $(SERVER_BIN) ./cmd/server
 
+.PHONY: build-crons
+build-crons: bin/audit-sealer bin/audit-verify bin/outbox-poller bin/settlement-runner bin/dispatcher-12377 bin/kyc-purge ## 编译全部 cron 二进制
+
+bin/audit-sealer:
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -o $@ ./cmd/audit-sealer
+
+bin/audit-verify:
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -o $@ ./cmd/audit-verify
+
+bin/outbox-poller:
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -o $@ ./cmd/outbox-poller
+
+bin/settlement-runner:
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -o $@ ./cmd/settlement-runner
+
+bin/dispatcher-12377: ## Fix-C CRIT-C2 — 12377 内容安全派单
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -o $@ ./cmd/dispatcher-12377
+
+bin/kyc-purge: ## Fix-C CRIT-C3 — PIPL 5y KYC PII purge cron
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -o $@ ./cmd/kyc-purge
+
 .PHONY: dev
 dev: ## 本地起 partner-api（默认监听 8080）
 	go run ./cmd/server

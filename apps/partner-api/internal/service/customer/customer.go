@@ -53,6 +53,9 @@ type RegisterInput struct {
 	FyUserID       int64  // Fy-api `/user/create` 返回的 user_id
 	InvitationCode string // 必填（防绕过强制）；admin 直营单独走 RegisterDirect
 	JoinedVia      string // 留空时按 InvitationCode 是否为空判定
+	// ConsentTextVersion Fix-C P1-7：客户端必须传当前条款版本；service 构造时注入的
+	// ConsentVerifier 会断言 == biz_setting.compliance.consent_text_version。
+	ConsentTextVersion string
 }
 
 // Validate 入参校验。
@@ -98,18 +101,32 @@ type FyAPIPort interface {
 	EraseUser(ctx context.Context, fyUserID int64, idemKey string) error
 }
 
+// ConsentVerifier Fix-C P1-7：consent_text_version guard 抽象（pkg/consent.VersionGuard 实现）.
+type ConsentVerifier interface {
+	Verify(version string) error
+}
+
+// alwaysOKConsent 默认实现：不强求版本（向后兼容）.
+type alwaysOKConsent struct{}
+
+func (alwaysOKConsent) Verify(string) error { return nil }
+
 // Service 客户主数据门面。
 type Service struct {
-	repo  Repository
-	inv   InvitationResolver
-	fyapi FyAPIPort
-	clock func() time.Time
+	repo    Repository
+	inv     InvitationResolver
+	fyapi   FyAPIPort
+	clock   func() time.Time
+	consent ConsentVerifier
 }
 
 // NewService .
 func NewService(repo Repository, inv InvitationResolver, fyapi FyAPIPort) *Service {
-	return &Service{repo: repo, inv: inv, fyapi: fyapi, clock: time.Now}
+	return &Service{repo: repo, inv: inv, fyapi: fyapi, clock: time.Now, consent: alwaysOKConsent{}}
 }
+
+// WithConsentVerifier Fix-C P1-7：注入版本守门员（main.go 启动期注入）。
+func (s *Service) WithConsentVerifier(v ConsentVerifier) *Service { s.consent = v; return s }
 
 // WithClock 测试注入。
 func (s *Service) WithClock(c func() time.Time) *Service { s.clock = c; return s }
@@ -121,6 +138,11 @@ func (s *Service) WithClock(c func() time.Time) *Service { s.clock = c; return s
 func (s *Service) Register(ctx context.Context, in RegisterInput) (*domain.Customer, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
+	}
+	if s.consent != nil {
+		if err := s.consent.Verify(in.ConsentTextVersion); err != nil {
+			return nil, err
+		}
 	}
 	if existing, _ := s.repo.FindByFyUserID(ctx, in.FyUserID); existing != nil {
 		if existing.PartnerID != nil {

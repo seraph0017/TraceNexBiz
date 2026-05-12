@@ -1,9 +1,10 @@
 // Package main is the audit-sealer cron entry（backend §10.1 / Fix-B' part 4 CRIT-B6）.
 //
-// 单 leader（dev: AlwaysLeader；prod: K8s Lease via W1a leader pkg）；
+// 单 leader（dev: AlwaysLeader；prod: Redis SETNX via pkg/leader.RedisLock）；
 // 200ms tick 拉 audit_log_unsealed → 写 audit_log + 哈希链 → 删 unsealed.
 //
 // Fix-B' part 4: bizDB 就绪时用 GormStore；缺 DSN → fail-fast 退出 1.
+// Fix-C item 8: Redis 就绪时切 RedisLeader（30s TTL / 10s refresh）；缺 Redis 仅 dev 允许降级.
 //
 // 退出条件：SIGTERM / leader lease lost / store error.
 package main
@@ -17,12 +18,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/audit"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/config"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/db"
+	infraredis "github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/redis"
+	pkgleader "github.com/seraph0017/tracenexbiz/apps/partner-api/pkg/leader"
 )
 
 func main() {
@@ -46,7 +50,7 @@ func main() {
 		store = audit.NewGormStore(bizDB)
 		log.Info().Msg("audit-sealer: GormStore backed by partner_db")
 	}
-	leader := audit.AlwaysLeader{} // W1c follow-up: Redis SETNX leader for multi-replica.
+	leader := buildLeader(cfg)
 	sealer := audit.NewSealer(store, leader)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -67,4 +71,25 @@ func main() {
 	}
 	log.Info().Msg("audit-sealer: stopped")
 	_ = http.StatusOK // satisfy import in case of future probe wiring
+}
+
+// buildLeader 返回 audit.LeaderLock。
+//
+// Fix-C item 8 语义：
+//   - Redis 可用                → RedisLeader (key=cron:audit-sealer, TTL=30s, refresh=10s)
+//   - Redis 不可用 + env=dev    → AlwaysLeader（单机 dev 起得来）
+//   - Redis 不可用 + 非 dev     → fail-fast（避免多 pod 双跑）
+func buildLeader(cfg *config.Config) audit.LeaderLock {
+	rdb, err := infraredis.Open(cfg)
+	if err != nil {
+		if cfg.Env != config.EnvDev {
+			log.Fatal().Err(err).Msg("audit-sealer: Redis required for leader election in staging/prod")
+		}
+		log.Warn().Err(err).Msg("audit-sealer: Redis unavailable, falling back to AlwaysLeader (dev only)")
+		return audit.AlwaysLeader{}
+	}
+	owner := "audit-sealer-" + uuid.NewString()
+	lock := pkgleader.NewRedisLock(rdb, "cron:audit-sealer", owner, 30*time.Second, 10*time.Second)
+	log.Info().Str("owner", owner).Msg("audit-sealer: Redis leader election active")
+	return audit.NewRedisLeader(lock)
 }
