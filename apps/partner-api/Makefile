@@ -36,6 +36,10 @@ lint: ## golangci-lint（含 bola-scope-required 占位）
 	@which golangci-lint > /dev/null || (echo "install: https://golangci-lint.run" && exit 1)
 	golangci-lint run ./...
 
+.PHONY: lint-bolascope
+lint-bolascope: ## 自研 BOLA scope 静态分析：每条路由必须声明 middleware.WithScope()
+	@go run ./tools/analysis/bolascope/cmd/bolascope ./...
+
 .PHONY: vet
 vet:
 	go vet ./...

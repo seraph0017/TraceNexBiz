@@ -193,8 +193,13 @@ func buildRouter(cfg *config.Config, rdb *redis.Client) http.Handler {
 	r.Use(filterByPrefix(middleware.WebhookIdempotency(rdb, cfg.InternalIdempotencyTTL), "/webhook"))
 
 	// ---- healthz（per backend §13.3）— 必须在鉴权链之后注册（healthz path 不匹配前缀） ----
+	// 这三个端点是 LB / k8s probe 调用的基础设施 endpoint，无 actor identity，无对象层访问；
+	// 故豁免 BOLA scope 检查（bolascope 静态分析器仅作用于业务路由）。
+	//bolascope:allow public liveness probe, no actor identity
 	r.GET("/healthz", handler.Healthz)
+	//bolascope:allow public liveness probe, no actor identity
 	r.GET("/healthz/live", handler.HealthzLive)
+	//bolascope:allow public readiness probe, no actor identity
 	r.GET("/healthz/ready", handler.HealthzReady)
 
 	// W1a：auth / partner / customer / kyc / wallet / invitation。
