@@ -143,13 +143,12 @@ func TestAdmin_StaffCreate_RequiresAllowlist(t *testing.T) {
 func TestAdmin_SagaForceResolve(t *testing.T) {
 	t.Parallel()
 	r, deps := newTestRouter(t)
-	tk, err := deps.SagaAdmin.IssueApproverToken(context.Background(), "saga-X", 222)
+	tk, err := deps.SagaAdmin.IssueApproverToken(context.Background(), "saga-X", 222, "10.99.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	w := doJSON(r, "POST", "/api/admin/saga/saga-X/force-resolve", map[string]any{
 		"approver_token": tk.Token,
-		"approver_ip":    "10.99.0.1",
 		"outcome":        "resolved",
 		"reason":         "manual",
 	})

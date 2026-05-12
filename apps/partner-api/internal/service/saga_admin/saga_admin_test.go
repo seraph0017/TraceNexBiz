@@ -18,13 +18,13 @@ func newTest() (*Service, *MemoryTokenStore, *MemoryCooldownStore, *StubResolver
 func TestForceResolve_HappyPath(t *testing.T) {
 	t.Parallel()
 	svc, _, _, rv, au := newTest()
-	tk, err := svc.IssueApproverToken(context.Background(), "saga-1", 200)
+	tk, err := svc.IssueApproverToken(context.Background(), "saga-1", 200, "10.2.2.7")
 	if err != nil {
 		t.Fatal(err)
 	}
 	err = svc.ForceResolve(context.Background(), ForceResolveInput{
 		SagaID: "saga-1", InitiatorStaffID: 100,
-		InitiatorIP: "10.1.1.5", ApproverIP: "10.2.2.7",
+		InitiatorIP: "10.1.1.5",
 		ApproverToken: tk.Token, Outcome: "resolved", Reason: "manual",
 	})
 	if err != nil {
@@ -41,10 +41,10 @@ func TestForceResolve_HappyPath(t *testing.T) {
 func TestForceResolve_RejectsSamePerson(t *testing.T) {
 	t.Parallel()
 	svc, _, _, _, _ := newTest()
-	tk, _ := svc.IssueApproverToken(context.Background(), "s", 100)
+	tk, _ := svc.IssueApproverToken(context.Background(), "s", 100, "10.2.1.1")
 	err := svc.ForceResolve(context.Background(), ForceResolveInput{
 		SagaID: "s", InitiatorStaffID: 100,
-		InitiatorIP: "10.1.1.1", ApproverIP: "10.2.1.1",
+		InitiatorIP: "10.1.1.1",
 		ApproverToken: tk.Token, Outcome: "resolved",
 	})
 	if !errors.Is(err, ErrApproverSamePerson) {
@@ -55,10 +55,10 @@ func TestForceResolve_RejectsSamePerson(t *testing.T) {
 func TestForceResolve_RejectsSameSubnet(t *testing.T) {
 	t.Parallel()
 	svc, _, _, _, _ := newTest()
-	tk, _ := svc.IssueApproverToken(context.Background(), "s", 200)
+	tk, _ := svc.IssueApproverToken(context.Background(), "s", 200, "10.1.1.7")
 	err := svc.ForceResolve(context.Background(), ForceResolveInput{
 		SagaID: "s", InitiatorStaffID: 100,
-		InitiatorIP: "10.1.1.5", ApproverIP: "10.1.1.7",
+		InitiatorIP: "10.1.1.5",
 		ApproverToken: tk.Token, Outcome: "resolved",
 	})
 	if !errors.Is(err, ErrApproverSameSubnet) {
@@ -69,10 +69,10 @@ func TestForceResolve_RejectsSameSubnet(t *testing.T) {
 func TestForceResolve_TokenSingleUse(t *testing.T) {
 	t.Parallel()
 	svc, _, _, _, _ := newTest()
-	tk, _ := svc.IssueApproverToken(context.Background(), "s", 200)
+	tk, _ := svc.IssueApproverToken(context.Background(), "s", 200, "10.2.2.2")
 	in := ForceResolveInput{
 		SagaID: "s", InitiatorStaffID: 100,
-		InitiatorIP: "10.1.1.1", ApproverIP: "10.2.2.2",
+		InitiatorIP: "10.1.1.1",
 		ApproverToken: tk.Token, Outcome: "resolved",
 	}
 	if err := svc.ForceResolve(context.Background(), in); err != nil {
@@ -89,11 +89,11 @@ func TestForceResolve_TokenSingleUse(t *testing.T) {
 func TestForceResolve_TokenExpiry(t *testing.T) {
 	t.Parallel()
 	svc, _, _, _, _ := newTest()
-	tk, _ := svc.IssueApproverToken(context.Background(), "s", 200)
+	tk, _ := svc.IssueApproverToken(context.Background(), "s", 200, "10.2.2.2")
 	svc.clock = func() time.Time { return time.Now().Add(2 * TokenTTL) }
 	err := svc.ForceResolve(context.Background(), ForceResolveInput{
 		SagaID: "s", InitiatorStaffID: 100,
-		InitiatorIP: "10.1.1.1", ApproverIP: "10.2.2.2",
+		InitiatorIP: "10.1.1.1",
 		ApproverToken: tk.Token, Outcome: "resolved",
 	})
 	if !errors.Is(err, ErrTokenInvalid) {
@@ -104,17 +104,17 @@ func TestForceResolve_TokenExpiry(t *testing.T) {
 func TestForceResolve_Cooldown(t *testing.T) {
 	t.Parallel()
 	svc, _, _, _, _ := newTest()
-	tk, _ := svc.IssueApproverToken(context.Background(), "s", 200)
+	tk, _ := svc.IssueApproverToken(context.Background(), "s", 200, "10.2.2.2")
 	in := ForceResolveInput{
 		SagaID: "s", InitiatorStaffID: 100,
-		InitiatorIP: "10.1.1.1", ApproverIP: "10.2.2.2",
+		InitiatorIP: "10.1.1.1",
 		ApproverToken: tk.Token, Outcome: "resolved",
 	}
 	if err := svc.ForceResolve(context.Background(), in); err != nil {
 		t.Fatal(err)
 	}
 	// Issue new token; second resolve hits cooldown
-	tk2, _ := svc.IssueApproverToken(context.Background(), "s", 300)
+	tk2, _ := svc.IssueApproverToken(context.Background(), "s", 300, "10.3.3.3")
 	in.ApproverToken = tk2.Token
 	err := svc.ForceResolve(context.Background(), in)
 	if !errors.Is(err, ErrCooldown) {

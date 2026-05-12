@@ -57,6 +57,7 @@ func Register(rg *gin.RouterGroup, deps Deps) {
 
 	rg.POST("/staff", staffCreate(deps.Staff))
 
+	rg.POST("/staff/approver-tokens", issueApproverToken(deps.SagaAdmin))
 	rg.POST("/saga/:id/force-resolve", sagaForceResolve(deps.SagaAdmin))
 }
 
@@ -333,9 +334,35 @@ func staffCreate(svc *staff.Service) gin.HandlerFunc {
 
 // ------------------------- saga force_resolve -------------------------
 
+type issueApproverTokenBody struct {
+	SagaID string `json:"saga_id" binding:"required"`
+}
+
+func issueApproverToken(svc *saga_admin.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if svc == nil {
+			unavailable(c, "saga_admin")
+			return
+		}
+		var body issueApproverTokenBody
+		if err := c.ShouldBindJSON(&body); err != nil {
+			bad(c, http.StatusBadRequest, "BIZ_VALID_BODY", err.Error())
+			return
+		}
+		approverID, _ := c.Get("staff_id")
+		approverIDInt, _ := approverID.(int64)
+		approverIP := clientIP(c)
+		tok, err := svc.IssueApproverToken(c.Request.Context(), body.SagaID, approverIDInt, approverIP)
+		if err != nil {
+			bad(c, http.StatusInternalServerError, "BIZ_SAGA_TOKEN_ISSUE", err.Error())
+			return
+		}
+		ok(c, gin.H{"token": tok.Token, "expires_at": tok.ExpiresAt.Unix()})
+	}
+}
+
 type forceResolveBody struct {
 	ApproverToken string `json:"approver_token" binding:"required"`
-	ApproverIP    string `json:"approver_ip" binding:"required"`
 	Outcome       string `json:"outcome" binding:"required"`
 	Reason        string `json:"reason"`
 }
@@ -362,7 +389,6 @@ func sagaForceResolve(svc *saga_admin.Service) gin.HandlerFunc {
 			SagaID:           sagaID,
 			InitiatorStaffID: actorIDInt,
 			InitiatorIP:      clientIP(c),
-			ApproverIP:       body.ApproverIP,
 			ApproverToken:    body.ApproverToken,
 			Outcome:          body.Outcome,
 			Reason:           body.Reason,

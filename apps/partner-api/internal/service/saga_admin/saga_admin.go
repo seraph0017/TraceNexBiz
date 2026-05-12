@@ -46,6 +46,7 @@ type ApproverToken struct {
 	Token       string
 	SagaID      string
 	ApproverID  int64
+	ApproverIP  string // captured at issue time from approver's request context
 	IssuedAt    time.Time
 	ExpiresAt   time.Time
 	Consumed    bool
@@ -102,9 +103,12 @@ func NewService(tokens TokenStore, cd CooldownStore, resolver SagaResolver, audi
 }
 
 // IssueApproverToken approver staff（不同人）颁发 token；后续 initiator 在 header 透传.
-func (s *Service) IssueApproverToken(ctx context.Context, sagaID string, approverID int64) (*ApproverToken, error) {
+func (s *Service) IssueApproverToken(ctx context.Context, sagaID string, approverID int64, approverIP string) (*ApproverToken, error) {
 	if sagaID == "" {
 		return nil, errors.New("saga_admin: saga_id required")
+	}
+	if approverIP == "" {
+		return nil, errors.New("saga_admin: approver_ip required")
 	}
 	tok, err := randomToken(32)
 	if err != nil {
@@ -112,7 +116,7 @@ func (s *Service) IssueApproverToken(ctx context.Context, sagaID string, approve
 	}
 	now := s.clock()
 	t := &ApproverToken{
-		Token: tok, SagaID: sagaID, ApproverID: approverID,
+		Token: tok, SagaID: sagaID, ApproverID: approverID, ApproverIP: approverIP,
 		IssuedAt: now, ExpiresAt: now.Add(TokenTTL),
 	}
 	if err := s.tokens.Issue(ctx, t); err != nil {
@@ -126,7 +130,6 @@ type ForceResolveInput struct {
 	SagaID           string
 	InitiatorStaffID int64
 	InitiatorIP      string
-	ApproverIP       string
 	ApproverToken    string
 	Outcome          string // resolved / compensated
 	Reason           string
@@ -151,8 +154,8 @@ func (s *Service) ForceResolve(ctx context.Context, in ForceResolveInput) error 
 	if tok.ApproverID == in.InitiatorStaffID {
 		return ErrApproverSamePerson
 	}
-	// Different /24 subnets
-	if same, err := same24(in.InitiatorIP, in.ApproverIP); err != nil {
+	// Different /24 subnets (approver IP comes from token, captured at issue time)
+	if same, err := same24(in.InitiatorIP, tok.ApproverIP); err != nil {
 		return err
 	} else if same {
 		return ErrApproverSameSubnet
@@ -167,7 +170,7 @@ func (s *Service) ForceResolve(ctx context.Context, in ForceResolveInput) error 
 	}
 	return s.audit.WriteForceResolve(ctx, ForceResolveEvent{
 		SagaID: in.SagaID, InitiatorStaffID: in.InitiatorStaffID, ApproverStaffID: tok.ApproverID,
-		InitiatorIP: in.InitiatorIP, ApproverIP: in.ApproverIP, TokenID: tok.Token[:8],
+		InitiatorIP: in.InitiatorIP, ApproverIP: tok.ApproverIP, TokenID: tok.Token[:8],
 		OccurredAt: now, Outcome: in.Outcome, Reason: in.Reason,
 	})
 }
