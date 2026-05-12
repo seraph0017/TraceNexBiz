@@ -4,7 +4,7 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { ApplyDraft } from "@/schemas/applyPartner";
 
-export type ApplyStep = "contact" | "company" | "scale" | "kyc" | "review" | "done";
+export type ApplyStep = "contact" | "company" | "scale" | "bank" | "kyc" | "review" | "done";
 
 export interface ApplyDraftState {
   step: ApplyStep;
@@ -40,7 +40,7 @@ export const useApplyDraft = create<ApplyDraftState>()(
     {
       name: STORAGE_KEY,
       storage: createJSONStorage(() => localStorage),
-      // 仅持久化非敏感字段；身份证 / 上传 URL 不写入 localStorage
+      // 仅持久化非敏感字段；身份证 / 上传 URL / 银行账号 不写入 localStorage
       partialize: (s) => ({
         step: s.step,
         submittedId: s.submittedId,
@@ -54,6 +54,10 @@ export const useApplyDraft = create<ApplyDraftState>()(
           unified_social_credit_code: s.draft.unified_social_credit_code,
           expected_monthly_calls: s.draft.expected_monthly_calls,
           expected_use_case: s.draft.expected_use_case,
+          tax_status: s.draft.tax_status,
+          settlement_bank_name: s.draft.settlement_bank_name,
+          settlement_account_holder: s.draft.settlement_account_holder,
+          // settlement_bank_account / legal_person_id 故意不持久化（PII）
         },
       }),
       version: 1,

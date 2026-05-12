@@ -1,5 +1,5 @@
 // 错误码 → toast i18n key 映射（frontend §5.4）.
-import type { ApiError } from './types';
+import type { ApiError } from './envelope';
 
 export interface ToastSpec {
   i18nKey: string;

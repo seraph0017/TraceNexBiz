@@ -4,6 +4,9 @@ import {
   CompanyStepSchema,
   ScaleStepSchema,
   KycStepSchema,
+  BankStepSchema,
+  TaxStatusSchema,
+  ConsentStepSchema,
   maskIdCard,
   maskPhone,
 } from "@/schemas/applyPartner";
@@ -136,6 +139,77 @@ describe("applyPartner schemas", () => {
     it("过短直接 ***", () => {
       expect(maskIdCard("123")).toBe("***");
       expect(maskPhone("123")).toBe("***");
+    });
+  });
+
+  describe("BankStepSchema (Fix-C item 5/6)", () => {
+    it("接受合法 12-19 位银行账号 + tax_status", () => {
+      const r = BankStepSchema.safeParse({
+        tax_status: "individual",
+        settlement_bank_name: "中国工商银行 北京海淀支行",
+        settlement_bank_account: "6222021234567890123",
+        settlement_account_holder: "张三",
+      });
+      expect(r.success).toBe(true);
+    });
+
+    it("拒绝过短银行账号", () => {
+      const r = BankStepSchema.safeParse({
+        tax_status: "individual",
+        settlement_bank_name: "中国工商银行",
+        settlement_bank_account: "123",
+        settlement_account_holder: "张三",
+      });
+      expect(r.success).toBe(false);
+    });
+
+    it("tax_status 必须是 5 值枚举", () => {
+      const r = BankStepSchema.safeParse({
+        tax_status: "freelancer",
+        settlement_bank_name: "中国工商银行",
+        settlement_bank_account: "6222021234567890123",
+        settlement_account_holder: "张三",
+      });
+      expect(r.success).toBe(false);
+    });
+
+    it("接受所有 5 个 tax_status 值", () => {
+      const okValues = ["individual", "sole_proprietor", "partnership", "llc", "corp"] as const;
+      for (const v of okValues) {
+        expect(TaxStatusSchema.safeParse(v).success).toBe(true);
+      }
+      expect(TaxStatusSchema.safeParse("xyz").success).toBe(false);
+    });
+  });
+
+  describe("ConsentStepSchema (Fix-C item 7)", () => {
+    it("接受完整 consent + consent_text_version", () => {
+      const r = ConsentStepSchema.safeParse({
+        consent_id: 1,
+        consent_version: "2026-05-pipl-v1",
+        consent_text_version: "2026-05-pipl-v1",
+        granted: true,
+      });
+      expect(r.success).toBe(true);
+    });
+
+    it("granted 必须 true", () => {
+      const r = ConsentStepSchema.safeParse({
+        consent_id: 1,
+        consent_version: "v1",
+        consent_text_version: "v1",
+        granted: false,
+      });
+      expect(r.success).toBe(false);
+    });
+
+    it("缺 consent_text_version 报错", () => {
+      const r = ConsentStepSchema.safeParse({
+        consent_id: 1,
+        consent_version: "v1",
+        granted: true,
+      });
+      expect(r.success).toBe(false);
     });
   });
 });

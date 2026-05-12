@@ -334,16 +334,28 @@ export async function updateSecuritySettings(input: Partial<SecuritySettings>): 
   return unwrap(apiClient.put<ApiEnvelope<SecuritySettings>>("/api/admin/security", input));
 }
 
-// ─── saga force-resolve（dual-control） ────────────────────────────
+// ─── saga force-resolve（dual-control / two-step） ─────────────────
+// Step 1: another staff issues an approver token for the saga.
+// Step 2: the initiator submits the token + outcome. Server records the
+// approver_ip server-side from session/conn so no field on this body.
+export interface ApproverTokenResp {
+  token: string;
+  expires_at: number; // unix seconds
+}
+export async function issueApproverToken(saga_id: string): Promise<ApproverTokenResp> {
+  return unwrap(
+    apiClient.post<ApiEnvelope<ApproverTokenResp>>("/api/admin/staff/approver-tokens", { saga_id }),
+  );
+}
+
 export interface ForceResolveInput {
   approver_token: string;
-  approver_ip: string;
   outcome: "resolved" | "compensated";
   reason?: string;
 }
-export async function forceResolveSaga(sagaId: string, input: ForceResolveInput): Promise<{ status: string }> {
+export async function forceResolveSaga(sagaId: string, input: ForceResolveInput): Promise<{ saga_id: string; outcome: string }> {
   return unwrap(
-    apiClient.post<ApiEnvelope<{ status: string }>>(`/api/admin/saga/${sagaId}/force-resolve`, input),
+    apiClient.post<ApiEnvelope<{ saga_id: string; outcome: string }>>(`/api/admin/saga/${sagaId}/force-resolve`, input),
   );
 }
 export interface SagaCandidate {

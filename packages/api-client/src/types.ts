@@ -1,14 +1,6 @@
-// Error envelope 类型（与 integration §8.1 / overview §11.3 一致）.
-export interface ApiEnvelope<T> {
-  success: boolean;
-  data: T | null;
-  error: ApiError | null;
-}
-
-export interface ApiError {
-  code: string;
-  message_zh?: string;
-  message_en?: string;
-  trace_id: string;
-  details?: Record<string, unknown>;
-}
+// DEPRECATED — types now live in ./envelope.ts. Kept as a re-export for
+// backward compatibility with code that imports `ApiEnvelope` / `ApiError`
+// from `@tnbiz/api-client/types`. New code should import from the package
+// root (which re-exports everything from envelope.ts).
+export type { ApiEnvelope, ApiError, PageMeta, PaginatedEnvelope } from "./envelope";
+export { ApiException } from "./envelope";

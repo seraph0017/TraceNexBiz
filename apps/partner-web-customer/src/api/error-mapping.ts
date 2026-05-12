@@ -1,5 +1,7 @@
 // 错误码 → toast i18n key 映射 —— 与 storefront 对齐 + W1f 增量
-import type { ApiError } from "./types";
+// 注：app-local 因为含 customer 端独有 i18n key（invitation / dispute / ticket）；
+// 通用映射在 `@tnbiz/api-client` 的 `mapApiError`，此处覆盖+扩展.
+import type { ApiError } from "@tnbiz/api-client";
 
 export interface ToastSpec {
   i18nKey: string;

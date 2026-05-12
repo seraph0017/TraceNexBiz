@@ -92,15 +92,25 @@ export interface PartnerApplyRequest {
   contact_email: string;
   /** PIPL 必收 —— 单独同意 ID */
   consent_id: number;
+  /** PRD §15.5 / Fix-C item 7：consent 文本版本号，后端 audit 校验 */
+  consent_text_version?: string;
   /** Fy-api 用户 ID（注册或登录后获得；招商申请允许游客先填） */
   fy_user_id?: number;
   /** 公司信息（type=enterprise 必填） */
   company_name?: string;
   unified_social_credit_code?: string;
+  /** 法人 / 申请人身份证（KMS 信封加密落库） */
+  legal_person_id?: string;
   /** 业务规模 */
   expected_monthly_calls?: number;
   expected_use_case?: string;
   source_channel?: string;
+  /** 税务身份枚举（Fix-C item 5） */
+  tax_status?: "individual" | "sole_proprietor" | "partnership" | "llc" | "corp";
+  /** 结算银行（Fix-C item 6：account 走 HMAC blind_index） */
+  settlement_bank_name?: string;
+  settlement_bank_account?: string;
+  settlement_account_holder?: string;
 }
 
 export interface PartnerApplyResponse {

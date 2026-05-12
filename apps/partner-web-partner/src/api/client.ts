@@ -1,3 +1,16 @@
+// TODO(Fix-D / 2026-05-12): MIGRATE TO `@tnbiz/api-client`.
+//   This file is a clone of the canonical client now living at
+//   `packages/api-client/src/client.ts`. partner-web-customer is already
+//   migrated; use its `src/api/client.ts` re-export shim as the reference.
+//   Steps:
+//     1. Add `"@tnbiz/api-client": "workspace:*"` to package.json deps.
+//     2. Replace this file's contents with:
+//          export { apiClient, createApiClient, unwrap, genUUID } from "@tnbiz/api-client";
+//          export type { AxiosRequestConfig } from "@tnbiz/api-client";
+//     3. Replace `./types.ts` with a re-export shim against `@tnbiz/api-client`.
+//     4. Run `pnpm typecheck && pnpm test && pnpm build` for this app.
+//   Until then this file is kept verbatim to avoid churning ~100 call sites.
+//
 // axios client + interceptors（frontend §5.2 / §6）
 //   - withCredentials: 携带 httpOnly cookie tnbiz_access / tnbiz_refresh
 //   - 自动注入 X-Oneapi-Request-Id（trace 透传）

@@ -1,3 +1,15 @@
+// TODO(Fix-D / 2026-05-12): MIGRATE TO `@tnbiz/api-client`.
+//   This file is the simpler 88-line variant (no silent-refresh). After
+//   migration this app gets silent-refresh "for free" via the canonical
+//   client. Use partner-web-customer's `src/api/client.ts` re-export shim
+//   as the reference. Steps:
+//     1. Add `"@tnbiz/api-client": "workspace:*"` to package.json deps.
+//     2. Replace this file's contents with:
+//          export { apiClient, createApiClient, unwrap, genUUID } from "@tnbiz/api-client";
+//          export type { AxiosRequestConfig } from "@tnbiz/api-client";
+//     3. Replace `./types.ts` with a re-export shim against `@tnbiz/api-client`.
+//     4. Run `pnpm typecheck && pnpm test && pnpm build` for this app.
+//
 // axios client + interceptors（frontend §5.2）
 //
 // 设计与 packages/api-client/src/client.ts 一致：

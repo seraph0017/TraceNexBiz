@@ -11,6 +11,7 @@ import {
   getSecuritySettings,
   updateSecuritySettings,
   forceResolveSaga,
+  issueApproverToken,
   listEscalatedSagas,
   type BizSetting,
   type SagaCandidate,
@@ -169,18 +170,33 @@ export function SagaForceResolve(): JSX.Element {
 
   const [sagaId, setSagaId] = useState("");
   const [token, setToken] = useState("");
-  const [ip, setIp] = useState("");
+  const [tokenExpiresAt, setTokenExpiresAt] = useState<number | null>(null);
   const [outcome, setOutcome] = useState<"resolved" | "compensated">("resolved");
   const [reason, setReason] = useState("");
 
+  // dual-control: Approve button issues a single-use approver_token bound to
+  // saga_id + approver staff session (server-side); MUST be clicked by a
+  // distinct staff member from the one who will Submit.
+  // approver_ip is now resolved server-side from c.ClientIP() — never accepted
+  // from the request body (CRIT-A4).
+  const approveMut = useMutation({
+    mutationFn: () => issueApproverToken(sagaId),
+    onSuccess: (r) => {
+      setToken(r.token);
+      setTokenExpiresAt(r.expires_at);
+      showSuccess(t("saga_force.approve_issued"));
+    },
+    onError: showError,
+  });
+
   const mut = useMutation({
     mutationFn: () =>
-      forceResolveSaga(sagaId, { approver_token: token, approver_ip: ip, outcome, reason: reason || undefined }),
+      forceResolveSaga(sagaId, { approver_token: token, outcome, reason: reason || undefined }),
     onSuccess: () => {
       showSuccess(t("saga_force.submit"));
       setSagaId("");
       setToken("");
-      setIp("");
+      setTokenExpiresAt(null);
       setReason("");
     },
     onError: showError,
@@ -216,10 +232,23 @@ export function SagaForceResolve(): JSX.Element {
           <Input value={sagaId} onChange={setSagaId} aria-label="saga-id" />
         </Field>
         <Field label={t("saga_force.approver_token")}>
-          <Input value={token} onChange={setToken} aria-label="approver-token" />
-        </Field>
-        <Field label={t("saga_force.approver_ip")}>
-          <Input value={ip} onChange={setIp} aria-label="approver-ip" />
+          <Input value={token} onChange={setToken} aria-label="approver-token" placeholder={t("saga_force.approver_token_hint")} />
+          <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
+            <Button
+              size="small"
+              loading={approveMut.isPending}
+              disabled={!sagaId}
+              onClick={() => approveMut.mutate()}
+              aria-label="issue-approver-token"
+            >
+              {t("saga_force.approve_action")}
+            </Button>
+            {tokenExpiresAt != null && (
+              <span style={{ fontSize: 12, opacity: 0.7 }}>
+                {t("saga_force.token_expires_at")}: {new Date(tokenExpiresAt * 1000).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
         </Field>
         <Field label={t("saga_force.outcome")}>
           <select value={outcome} onChange={(e) => setOutcome(e.target.value as "resolved" | "compensated")}>
@@ -234,7 +263,7 @@ export function SagaForceResolve(): JSX.Element {
           theme="solid"
           type="primary"
           loading={mut.isPending}
-          disabled={!sagaId || !token || !ip}
+          disabled={!sagaId || !token}
           onClick={() => mut.mutate()}
         >
           {t("saga_force.submit")}

@@ -11,6 +11,19 @@ const USCC_RE = /^[0-9A-HJ-NPQRTUWXY]{18}$/;
 
 export const PartnerTypeSchema = z.enum(["individual", "enterprise"]);
 
+/** 税务身份枚举（Fix-C 第 5 项；对齐 partner.tax_status 5 值） */
+export const TaxStatusSchema = z.enum([
+  "individual",
+  "sole_proprietor",
+  "partnership",
+  "llc",
+  "corp",
+]);
+export type TaxStatus = z.infer<typeof TaxStatusSchema>;
+
+/** 中国大陆银行账号：12-19 位数字（粗校验） */
+const BANK_ACCOUNT_RE = /^\d{12,19}$/;
+
 export const ContactStepSchema = z.object({
   type: PartnerTypeSchema,
   contact_name: z.string().trim().min(2, "validation.too_short").max(40, "validation.too_long"),
@@ -61,6 +74,15 @@ export const ScaleStepSchema = z.object({
   expected_use_case: z.string().trim().min(10, "validation.too_short").max(500, "validation.too_long"),
 });
 
+/** 结算银行账户 + 税务身份（PRD §15.4 个人渠道商代扣代缴 + Fix-C item 5/6） */
+export const BankStepSchema = z.object({
+  tax_status: TaxStatusSchema,
+  settlement_bank_name: z.string().trim().min(2, "validation.too_short").max(80, "validation.too_long"),
+  settlement_bank_account: z.string().regex(BANK_ACCOUNT_RE, "validation.bank_account"),
+  settlement_account_holder: z.string().trim().min(2, "validation.too_short").max(80, "validation.too_long"),
+});
+export type BankStep = z.infer<typeof BankStepSchema>;
+
 export const KycStepSchema = z.object({
   id_front_url: z.string().url(),
   id_back_url: z.string().url(),
@@ -71,6 +93,8 @@ export const KycStepSchema = z.object({
 export const ConsentStepSchema = z.object({
   consent_id: z.number().int().positive(),
   consent_version: z.string().min(1),
+  /** PRD §15.5 / Fix-C item 7：consent_text_version 上送后端 audit 校验 */
+  consent_text_version: z.string().min(1),
   granted: z.literal(true, {
     errorMap: () => ({ message: "apply.consent.required" }),
   }),
@@ -83,12 +107,18 @@ export const ApplyDraftSchema = ContactStepSchema.merge(
     legal_person_id: z.string().optional().or(z.literal("")),
     expected_monthly_calls: z.number().int().positive().optional(),
     expected_use_case: z.string().optional().or(z.literal("")),
+    /** 银行 / 税务（Step3Bank） */
+    tax_status: TaxStatusSchema.optional(),
+    settlement_bank_name: z.string().optional().or(z.literal("")),
+    settlement_bank_account: z.string().optional().or(z.literal("")),
+    settlement_account_holder: z.string().optional().or(z.literal("")),
     id_front_url: z.string().url().optional().or(z.literal("")),
     id_back_url: z.string().url().optional().or(z.literal("")),
     business_license_url: z.string().url().optional().or(z.literal("")),
     legal_person_face_url: z.string().url().optional().or(z.literal("")),
     consent_id: z.number().int().positive().optional(),
     consent_version: z.string().optional().or(z.literal("")),
+    consent_text_version: z.string().optional().or(z.literal("")),
     granted: z.boolean().optional(),
   }),
 );
