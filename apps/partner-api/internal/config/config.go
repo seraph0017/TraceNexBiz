@@ -39,6 +39,7 @@ type Config struct {
 	KMS        KMSConfig
 	OSS        OSSConfig
 	SLS        SLSConfig
+	MNS        MNSConfig
 	FyAPI      FyAPIConfig
 	BizSetting *BizSettingConfig
 
@@ -108,6 +109,25 @@ type SLSConfig struct {
 	Endpoint string
 	Project  string
 	Logstore string
+}
+
+// MNSConfig 阿里云 MNS（Fix-B' part 3 CRIT-B5）.
+//
+// SOURCE: partner-api 把本地 outbox 行发到 QueueOut（事件由其它服务消费）.
+// SINK:   partner-api 长轮询 QueueIn（消费其它服务投递的事件，如 Fy-api 流向 partner-api）.
+//
+// 默认 backend：APP_ENV=prod 时必须 aliyun_mns；缺 Endpoint/AccessKey → fail-fast.
+type MNSConfig struct {
+	Backend              string // "aliyun_mns" | "memstub"；默认 prod=aliyun_mns / dev=memstub
+	Endpoint             string // https://{accountId}.mns.{region}.aliyuncs.com
+	AccessKeyID          string
+	AccessKeySecret      string
+	QueueIn              string // SINK 长轮询队列
+	QueueOut             string // SOURCE 发布队列
+	QueueDLQ             string // DLQ 队列名
+	VisibilityTimeoutSec int    // ChangeVisibility 默认；MNS console 也可配
+	LongPollSec          int    // ReceiveMessage waitseconds；MNS 最大 30
+	DLQThreshold         int    // dequeue_count 达此值 → MoveToDLQ
 }
 
 // FyAPIConfig Fy-api 内部客户端配置。
@@ -181,6 +201,18 @@ func Load() (*Config, error) {
 			Project:  getenv("SLS_PROJECT", "tnbiz-dev"),
 			Logstore: getenv("SLS_LOGSTORE", "partner-api"),
 		},
+		MNS: MNSConfig{
+			Backend:              getenv("OUTBOX_BACKEND", ""), // 由 validate 补默认
+			Endpoint:             getenv("MNS_ENDPOINT", ""),
+			AccessKeyID:          getenv("MNS_ACCESS_KEY_ID", ""),
+			AccessKeySecret:      getenv("MNS_ACCESS_KEY_SECRET", ""),
+			QueueIn:              getenv("MNS_QUEUE_IN", "tnbiz-partner-in"),
+			QueueOut:             getenv("MNS_QUEUE_OUT", "tnbiz-partner-out"),
+			QueueDLQ:             getenv("MNS_QUEUE_DLQ", "tnbiz-partner-dlq"),
+			VisibilityTimeoutSec: int(getenvInt64("MNS_VISIBILITY_TIMEOUT_SEC", 30)),
+			LongPollSec:          int(getenvInt64("MNS_LONG_POLL_SEC", 20)),
+			DLQThreshold:         int(getenvInt64("MNS_DLQ_THRESHOLD", 10)),
+		},
 		FyAPI: FyAPIConfig{
 			BaseURL:    getenv("FYAPI_BASE_URL", "http://127.0.0.1:3000"),
 			HMACKeyID:  getenv("FYAPI_HMAC_KEY_ID", ""),
@@ -215,6 +247,25 @@ func (c *Config) validate() error {
 	if c.IdempotencyTTL > c.InternalIdempotencyTTL {
 		return fmt.Errorf("invariant violation: idempotency_ttl_hours (%s) must be <= internal_idempotency_ttl_days × 24 (%s)",
 			c.IdempotencyTTL, c.InternalIdempotencyTTL)
+	}
+	// MNS backend default + prod hardening (Fix-B' part 3 CRIT-B5).
+	if c.MNS.Backend == "" {
+		if c.Env == EnvProd {
+			c.MNS.Backend = "aliyun_mns"
+		} else {
+			c.MNS.Backend = "memstub"
+		}
+	}
+	switch c.MNS.Backend {
+	case "aliyun_mns", "memstub":
+	default:
+		return fmt.Errorf("OUTBOX_BACKEND must be aliyun_mns|memstub, got %q", c.MNS.Backend)
+	}
+	if c.Env == EnvProd && c.MNS.Backend == "memstub" {
+		return fmt.Errorf("OUTBOX_BACKEND=memstub refused in prod (Fix-B' CRIT-B5 fail-closed)")
+	}
+	if c.MNS.Backend == "aliyun_mns" && (c.MNS.Endpoint == "" || c.MNS.AccessKeyID == "" || c.MNS.AccessKeySecret == "") {
+		return fmt.Errorf("OUTBOX_BACKEND=aliyun_mns requires MNS_ENDPOINT / MNS_ACCESS_KEY_ID / MNS_ACCESS_KEY_SECRET")
 	}
 	return nil
 }

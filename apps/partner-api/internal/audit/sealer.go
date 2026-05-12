@@ -47,6 +47,13 @@ type UnsealedRow struct {
 	TraceID          string
 	SecondApproverID *int64
 	OccurredAt       time.Time
+
+	// Fix-B' part 4 CRIT-B6: middleware AuditEntry → unsealed 映射字段.
+	Route        string
+	Method       string
+	Status       int
+	RequestHash  string  // SHA-256 of canonical PII-scrubbed body
+	PayloadJSON  *string // NULL for GET
 }
 
 // SealedRow audit_log 哈希链最终行.
@@ -190,6 +197,9 @@ func Verify(ctx context.Context, store Store, since int64) error {
 }
 
 // computeHash canonicalize 字段并 sha256.
+//
+// Fix-B' part 4 CRIT-B6: 增加 Route/Method/Status/RequestHash/PayloadJSON 进 canonical form。
+// 旧字段顺序保持不变 — 新字段附在末尾，零值时仍能产生确定性结果。
 func computeHash(r SealedRow) string {
 	h := sha256.New()
 	approver := int64(0)
@@ -200,10 +210,15 @@ func computeHash(r SealedRow) string {
 	if r.DiffPIIID != nil {
 		piiID = *r.DiffPIIID
 	}
-	fmt.Fprintf(h, "%d|%s|%d|%s|%s|%d|%s|%s|%d|%s|%s|%s|%d|%d|%s",
+	payload := ""
+	if r.PayloadJSON != nil {
+		payload = *r.PayloadJSON
+	}
+	fmt.Fprintf(h, "%d|%s|%d|%s|%s|%d|%s|%s|%d|%s|%s|%s|%d|%d|%s|%s|%s|%d|%s|%s",
 		r.ID, r.ActorType, r.ActorID, r.Action, r.TargetType, r.TargetID, r.TargetKey,
 		r.DiffRedacted, piiID, r.IPAddress, r.UserAgent, r.TraceID, approver,
-		r.OccurredAt.UnixNano(), r.PrevHash)
+		r.OccurredAt.UnixNano(), r.PrevHash,
+		r.Route, r.Method, r.Status, r.RequestHash, payload)
 	return hex.EncodeToString(h.Sum(nil))
 }
 

@@ -28,6 +28,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/audit"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/config"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/domain"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/handler"
@@ -35,6 +36,7 @@ import (
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/kms"
 	infraredis "github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/redis"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/middleware"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/outbox"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/repository/mysql"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/auth"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/customer"
@@ -93,6 +95,12 @@ func main() {
 			log.Fatal().Err(err).Msg("server crashed")
 		}
 	}()
+
+	// Outbox MNS SINK (Fix-B' part 3 CRIT-B5): SOURCE 由 outbox-poller cmd 单独运行；
+	// SINK 在 server 进程内长轮询 MNS QueueIn 并 dispatch 到注册的 handler。
+	mnsCtx, mnsCancel := context.WithCancel(context.Background())
+	defer mnsCancel()
+	startMNSConsumer(mnsCtx, cfg)
 
 	// 优雅退出（per backend §13.4）
 	stop := make(chan os.Signal, 1)
@@ -153,17 +161,29 @@ func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB) http.Han
 	r.Use(middleware.CORS(cfg.AllowedOrigins))
 	r.Use(middleware.SecurityHeaders())
 
-	// Audit sink：drop-on-overflow，1024 buffer；W1c sealer 接 MySQL。
-	auditSink := middleware.NewBufferedSink(1024, func(e middleware.AuditEntry) {
-		log.Info().
-			Str("actor_type", e.ActorType).
-			Int64("actor_id", e.ActorID).
-			Str("method", e.Method).
-			Str("path", e.Path).
-			Int("status", e.Status).
-			Str("trace_id", e.RequestID).
-			Msg("audit")
-	})
+	// Audit sink：drop-on-overflow，1024 buffer。
+	// Fix-B' part 4 CRIT-B6: bizDB 就绪时 → EnqueueSink 落 audit_log_unsealed；
+	//                       否则降级到 log-only BufferedSink（dev / W0 fallback）。
+	var auditSink middleware.AuditSink
+	if bizDB != nil {
+		gormStore := audit.NewGormStore(bizDB)
+		enqueueSink := audit.NewEnqueueSink(gormStore, 1024)
+		auditSink = &auditEnqueueAdapter{sink: enqueueSink}
+		log.Info().Msg("audit sink: GORM EnqueueSink → audit_log_unsealed")
+	} else {
+		buffered := middleware.NewBufferedSink(1024, func(e middleware.AuditEntry) {
+			log.Info().
+				Str("actor_type", e.ActorType).
+				Int64("actor_id", e.ActorID).
+				Str("method", e.Method).
+				Str("path", e.Path).
+				Int("status", e.Status).
+				Str("trace_id", e.RequestID).
+				Msg("audit")
+		})
+		auditSink = buffered
+		log.Warn().Msg("audit sink: bizDB unavailable, falling back to log-only BufferedSink (dev/W0 only)")
+	}
 	r.Use(middleware.Audit(auditSink))
 
 	// ---- 鉴权依赖构造（fail-fast） ----
@@ -359,4 +379,81 @@ func (a *invitationAdapter) Resolve(ctx context.Context, code string) (*domain.I
 // Consume .
 func (a *invitationAdapter) Consume(ctx context.Context, code string) (*domain.InvitationCode, error) {
 	return a.svc.Consume(ctx, code)
+}
+
+// auditEnqueueAdapter 桥 middleware.AuditEntry → audit.UnsealedRow（Fix-B' part 4 CRIT-B6）.
+//
+// payload_json 用 BodyRedacted 透传（middleware 已经 piiscrubber.Redact 过）；
+// request_hash = SHA-256(BodyRedacted)；route/method/status/trace_id/client_ip 直接映射。
+//
+// 不阻塞 HTTP 链路：EnqueueSink.Send 内部是非阻塞 channel send。
+type auditEnqueueAdapter struct {
+	sink *audit.EnqueueSink
+}
+
+func (a *auditEnqueueAdapter) Send(e middleware.AuditEntry) {
+	var payload *string
+	if len(e.BodyRedacted) > 0 {
+		s := string(e.BodyRedacted)
+		payload = &s
+	}
+	a.sink.Send(audit.UnsealedRow{
+		ActorType:   e.ActorType,
+		ActorID:     e.ActorID,
+		Action:      e.Method + " " + e.Path,
+		TargetType:  "http_request",
+		Route:       e.Path,
+		Method:      e.Method,
+		Status:      e.Status,
+		RequestHash: audit.HashRequestBody(e.BodyRedacted),
+		PayloadJSON: payload,
+		TraceID:     e.RequestID,
+		IPAddress:   e.IP,
+		UserAgent:   e.UserAgent,
+		OccurredAt:  time.Now().UTC(),
+	})
+}
+
+// startMNSConsumer 启动 outbox SINK（Fix-B' part 3 CRIT-B5）.
+//
+// backend=memstub → 跳过（dev 默认）；
+// backend=aliyun_mns → 构造 HTTPMNSClient + MNSConsumer，goroutine 长轮询 QueueIn.
+//
+// 未注册 event_type 时 NoopOnUnknown=true → log warning + ack（不阻塞队列）.
+// Phase-1 不注册任何 handler；后续 PR 在此处按 event_type 注册业务回调.
+func startMNSConsumer(ctx context.Context, cfg *config.Config) {
+	if cfg.MNS.Backend != "aliyun_mns" {
+		log.Info().Str("backend", cfg.MNS.Backend).Msg("outbox sink: skipped (non-MNS backend)")
+		return
+	}
+	client, err := outbox.NewHTTPMNSClient(outbox.MNSConfig{
+		Endpoint:        cfg.MNS.Endpoint,
+		AccessKeyID:     cfg.MNS.AccessKeyID,
+		AccessKeySecret: cfg.MNS.AccessKeySecret,
+		Timeout:         time.Duration(cfg.MNS.LongPollSec+15) * time.Second,
+	})
+	if err != nil {
+		log.Fatal().Err(err).Msg("outbox sink: NewHTTPMNSClient failed")
+	}
+	consumer, err := outbox.NewMNSConsumer(client, outbox.MNSConsumerOptions{
+		QueueName:     cfg.MNS.QueueIn,
+		DLQName:       cfg.MNS.QueueDLQ,
+		WaitSeconds:   cfg.MNS.LongPollSec,
+		DLQThreshold:  cfg.MNS.DLQThreshold,
+		NoopOnUnknown: true,
+	})
+	if err != nil {
+		log.Fatal().Err(err).Msg("outbox sink: NewMNSConsumer failed")
+	}
+	// TODO(post-B5): consumer.Register("<event_type>", handler) 按业务领域注册.
+	go func() {
+		log.Info().
+			Str("queue", cfg.MNS.QueueIn).
+			Str("dlq", cfg.MNS.QueueDLQ).
+			Int("wait_sec", cfg.MNS.LongPollSec).
+			Msg("outbox sink: starting MNS consumer")
+		if err := consumer.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error().Err(err).Msg("outbox sink: consumer.Run exited with error")
+		}
+	}()
 }
