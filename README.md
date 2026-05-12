@@ -102,6 +102,12 @@ Round-3 通过后五方再 review → 0 CRITICAL / 0 HIGH → 进 staging。
 
 参见 `docs/00-architecture-overview.md` §22.3：ICP 证、生成式 AI 备案、持牌分账上线、个税代扣、全电发票、PIA 报告、等保 2.0 二级、DPO 公示、内容安全闭环——任意一项不达标，Phase 2 商业化不能上线。
 
+## 测试环境部署
+
+低成本阿里云测试环境建议先走单 VPC、单 ECS、Podman + Nginx + 托管 RDS/Redis/OSS/MNS/SLS/KMS，不急着上 ACK。规格可以从 `2c4g` 跑 smoke 起步；如果同机跑 Fy-api + TraceNexBiz 或在服务器上构建镜像，建议 `4c8g`。
+
+详见 [`docs/test-env-aliyun.md`](docs/test-env-aliyun.md)。
+
 ## 本地 Dev Quickstart
 
 ```bash
