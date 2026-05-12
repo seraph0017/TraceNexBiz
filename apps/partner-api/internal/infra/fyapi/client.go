@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,7 +26,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -90,9 +93,10 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 		}
 	}
 
+	rawQuery := req.Query.Encode()
 	urlStr := c.baseURL + req.Path
-	if len(req.Query) > 0 {
-		urlStr += "?" + req.Query.Encode()
+	if rawQuery != "" {
+		urlStr += "?" + rawQuery
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, urlStr, bytes.NewReader(body))
@@ -101,10 +105,10 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// HMAC 4 元组（per integration §17）
+	// HMAC 4 元组（integration-design v1.2 §1.1.3 权威）
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	nonce := uuid.NewString()
-	sig := c.sign(req.Method, req.Path, req.Query.Encode(), body, ts, nonce)
+	sig := c.sign(req.Method, req.Path, rawQuery, body, ts, nonce)
 
 	httpReq.Header.Set("X-Auth-KeyId", c.keyID)
 	httpReq.Header.Set("X-Auth-Timestamp", ts)
@@ -130,16 +134,52 @@ func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 	return &Response{Status: resp.StatusCode, Body: respBody}, nil
 }
 
-// sign 计算 HMAC-SHA256 签名（per integration §17 canonical 形式）。
+// sign 计算 HMAC-SHA256 签名（integration-design v1.2 §1.1.3 权威 canonical）。
 //
-// canonical = method + "\n" + path + "\n" + query + "\n" + sha256(body) + "\n" + ts + "\n" + nonce
-func (c *Client) sign(method, path, query string, body []byte, ts, nonce string) string {
+//	canonical = METHOD\nPATH\ncanonical_query\nTS\nNONCE\nSHA256_HEX(body)
+//
+// METHOD uppercase；canonical_query 按 key 字典序 RFC3986 编码；签名输出 base64。
+// 与 Fy-api middleware/internal_auth.go::BuildCanonical 字节级一致。
+func (c *Client) sign(method, path, rawQuery string, body []byte, ts, nonce string) string {
 	bodyHash := sha256.Sum256(body)
-	canonical := method + "\n" + path + "\n" + query + "\n" + hex.EncodeToString(bodyHash[:]) + "\n" + ts + "\n" + nonce
+	canonical := strings.Join([]string{
+		strings.ToUpper(method),
+		path,
+		canonicalQuery(rawQuery),
+		ts,
+		nonce,
+		hex.EncodeToString(bodyHash[:]),
+	}, "\n")
 
 	mac := hmac.New(sha256.New, c.hmacSecret)
 	mac.Write([]byte(canonical))
-	return hex.EncodeToString(mac.Sum(nil))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// canonicalQuery 与 Fy-api 端 canonicalQuery 完全一致：按 key 字典序，每对 RFC3986 编码。
+func canonicalQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return ""
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(values))
+	for _, k := range keys {
+		vs := values[k]
+		sort.Strings(vs)
+		ek := url.QueryEscape(k)
+		for _, v := range vs {
+			parts = append(parts, ek+"="+url.QueryEscape(v))
+		}
+	}
+	return strings.Join(parts, "&")
 }
 
 func isInternalPath(p string) bool {
