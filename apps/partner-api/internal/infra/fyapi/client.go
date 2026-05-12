@@ -187,34 +187,264 @@ func isInternalPath(p string) bool {
 	return len(p) >= len(prefix) && p[:len(prefix)] == prefix
 }
 
-// 以下为 W1b 必须实现的 endpoint 方法占位。
+// ErrRetryable 标识可重试错误（5xx / 网络 timeout / Status==0）；
+// saga 层用 errors.Is(err, ErrRetryable) 决定是否走 retry/compensate。
+var ErrRetryable = errors.New("fyapi: retryable")
+
+// envelope 是 Fy-api 统一返回结构（health.go::respondJSON / respondError）。
+type envelope struct {
+	Success bool            `json:"success"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
+	Error   *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// doAndDecode 调用 Do 并把响应映射到 envelope + retryable/non-retryable error。
 //
-// 全部按 integration §2 字段级 schema 实现，每个方法都必须：
-//   1) 透传 ctx、Idempotency-Key、TraceID
-//   2) 5xx / timeout 包成 retryable error；非 retryable 不进 saga retry
-//   3) 解 envelope；返回 typed result + biz error code
+//   - 网络错误 / Status==0 / 5xx → wrap ErrRetryable
+//   - 4xx 或 envelope.Success=false → 非 retryable
+//   - 2xx 且 success=true → 解析 data 到 out（out 可为 nil 表示忽略）
+func (c *Client) doAndDecode(ctx context.Context, req Request, out interface{}) error {
+	resp, err := c.Do(ctx, req)
+	if err != nil {
+		return fmt.Errorf("%w: transport: %v", ErrRetryable, err)
+	}
+	if resp.Status == 0 || resp.Status >= 500 {
+		return fmt.Errorf("%w: status=%d body=%s", ErrRetryable, resp.Status, truncate(resp.Body, 256))
+	}
 
-// CreateUser TODO(W1b): per integration §2 - POST /api/internal/user/create
-func (c *Client) CreateUser(_ context.Context, _ interface{}) (interface{}, error) {
-	return nil, errors.New("fyapi: CreateUser not implemented; W1b to wire per integration §2")
+	var env envelope
+	if len(resp.Body) > 0 {
+		if err := json.Unmarshal(resp.Body, &env); err != nil {
+			// 服务端契约破坏：4xx 不带 envelope 也算非 retryable
+			return fmt.Errorf("fyapi: status=%d malformed envelope: %v body=%s", resp.Status, err, truncate(resp.Body, 256))
+		}
+	}
+
+	if resp.Status >= 400 {
+		msg := env.Message
+		if env.Error != nil {
+			msg = env.Error.Code + ": " + env.Error.Message
+		}
+		return fmt.Errorf("fyapi: status=%d %s", resp.Status, msg)
+	}
+	if !env.Success {
+		msg := env.Message
+		if env.Error != nil {
+			msg = env.Error.Code + ": " + env.Error.Message
+		}
+		return fmt.Errorf("fyapi: biz error: %s", msg)
+	}
+
+	if out != nil && len(env.Data) > 0 {
+		if err := json.Unmarshal(env.Data, out); err != nil {
+			return fmt.Errorf("fyapi: decode data: %w", err)
+		}
+	}
+	return nil
 }
 
-// SetGroupRatioOverride TODO(W1b): per integration §2 - POST /api/internal/user/group-ratio-override
-func (c *Client) SetGroupRatioOverride(_ context.Context, _ interface{}) (interface{}, error) {
-	return nil, errors.New("fyapi: SetGroupRatioOverride not implemented; W1b to wire per integration §2")
+func truncate(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "...(truncated)"
 }
 
-// AdjustQuota TODO(W1b): per integration §2 - POST /api/internal/user/quota/adjust
-func (c *Client) AdjustQuota(_ context.Context, _ interface{}) (interface{}, error) {
-	return nil, errors.New("fyapi: AdjustQuota not implemented; W1b to wire per integration §2")
+// TopupResponse 与 Fy-api controller/tnbiz_internal/user.go::TopupResponse 对齐。
+type TopupResponse struct {
+	UserID    int64 `json:"user_id"`
+	NewQuota  int64 `json:"new_quota"`
+	UsedQuota int64 `json:"used_quota"`
 }
 
-// CreateToken TODO(W1b): per integration §2 - POST /api/internal/token/create
-func (c *Client) CreateToken(_ context.Context, _ interface{}) (interface{}, error) {
-	return nil, errors.New("fyapi: CreateToken not implemented; W1b to wire per integration §2")
+// TopupCustomer POST /api/internal/user/topup（integration §2.2.2）。
+//
+// Fy-api 端字段名为 `quota`（绝对增量，>0），不是 spec 文案里的 `amount`；
+// 我们以服务端为准（参见 controller/tnbiz_internal/user.go::TopupRequest）。
+func (c *Client) TopupCustomer(ctx context.Context, fyUserID, amount int64, idemKey, traceID string) error {
+	if fyUserID <= 0 {
+		return errors.New("fyapi: fy_user_id required")
+	}
+	if amount <= 0 {
+		return errors.New("fyapi: amount must be > 0")
+	}
+	if idemKey == "" {
+		return errors.New("fyapi: idempotency key required")
+	}
+	body := map[string]interface{}{
+		"user_id": fyUserID,
+		"quota":   amount,
+		"reason":  "partner_allocate",
+	}
+	var out TopupResponse
+	return c.doAndDecode(ctx, Request{
+		Method:         http.MethodPost,
+		Path:           "/api/internal/user/topup",
+		Body:           body,
+		IdempotencyKey: idemKey,
+		TraceID:        traceID,
+	}, &out)
 }
 
-// GetUsage TODO(W1b): per integration §2 - GET /api/internal/usage/*
-func (c *Client) GetUsage(_ context.Context, _ interface{}) (interface{}, error) {
-	return nil, errors.New("fyapi: GetUsage not implemented; W1b to wire per integration §2")
+// RefundCustomer POST /api/internal/user/refund（integration §2.2.3 deduct 的实现：
+// Fy-api 端 handler 名为 Refund，路径 /user/refund，语义对称 — quota>0 加回客户余额）。
+func (c *Client) RefundCustomer(ctx context.Context, fyUserID, amount int64, idemKey, traceID string) error {
+	if fyUserID <= 0 {
+		return errors.New("fyapi: fy_user_id required")
+	}
+	if amount <= 0 {
+		return errors.New("fyapi: amount must be > 0")
+	}
+	if idemKey == "" {
+		return errors.New("fyapi: idempotency key required")
+	}
+	body := map[string]interface{}{
+		"user_id":  fyUserID,
+		"quota":    amount,
+		"saga_id":  idemKey,
+		"order_ref": traceID,
+	}
+	var out TopupResponse
+	return c.doAndDecode(ctx, Request{
+		Method:         http.MethodPost,
+		Path:           "/api/internal/user/refund",
+		Body:           body,
+		IdempotencyKey: idemKey,
+		TraceID:        traceID,
+	}, &out)
+}
+
+// UpdateUserGroup PUT /api/internal/user/group（integration §2.2.5）。
+//
+// TODO(Fy-api): 目前 Fy-api 端尚未实现 /user/group handler（仅
+// router 未挂载；controller/tnbiz_internal 无对应 func）。一旦
+// Fy-api 端 PR 落地，本方法直接生效；此处保留客户端调用形态便于联调。
+func (c *Client) UpdateUserGroup(ctx context.Context, fyUserID int64, group, idemKey string) error {
+	if fyUserID <= 0 {
+		return errors.New("fyapi: fy_user_id required")
+	}
+	if group == "" {
+		return errors.New("fyapi: group required")
+	}
+	if idemKey == "" {
+		return errors.New("fyapi: idempotency key required")
+	}
+	return errors.New("fyapi: not yet implemented on Fy-api side: PUT /api/internal/user/group")
+}
+
+// EraseUser POST /api/internal/user/erase（integration §2.2.12）。
+//
+// TODO(Fy-api): handler 尚未在 Fy-api 仓库实现。
+func (c *Client) EraseUser(ctx context.Context, fyUserID int64, idemKey string) error {
+	if fyUserID <= 0 {
+		return errors.New("fyapi: fy_user_id required")
+	}
+	if idemKey == "" {
+		return errors.New("fyapi: idempotency key required")
+	}
+	return errors.New("fyapi: not yet implemented on Fy-api side: POST /api/internal/user/erase")
+}
+
+// QuotaResponse 与 Fy-api controller/tnbiz_internal/user.go::QuotaResponse 对齐。
+type QuotaResponse struct {
+	UserID    int64 `json:"user_id"`
+	Quota     int64 `json:"quota"`
+	UsedQuota int64 `json:"used_quota"`
+	AffQuota  int64 `json:"aff_quota"`
+}
+
+// GetUserQuota GET /api/internal/user/quota?user_id=...
+//
+// 返回客户当前 quota；GET 不需 idempotency key。
+func (c *Client) GetUserQuota(ctx context.Context, fyUserID int64) (int64, error) {
+	if fyUserID <= 0 {
+		return 0, errors.New("fyapi: fy_user_id required")
+	}
+	q := url.Values{}
+	q.Set("user_id", strconv.FormatInt(fyUserID, 10))
+	var out QuotaResponse
+	if err := c.doAndDecode(ctx, Request{
+		Method: http.MethodGet,
+		Path:   "/api/internal/user/quota",
+		Query:  q,
+	}, &out); err != nil {
+		return 0, err
+	}
+	return out.Quota, nil
+}
+
+// CreateTokenRequest 透传到 Fy-api/controller/tnbiz_internal/token.go::CreateTokenRequest。
+type CreateTokenRequest struct {
+	UserID         int64    `json:"user_id"`
+	Name           string   `json:"name"`
+	Group          string   `json:"group,omitempty"`
+	UnlimitedQuota bool     `json:"unlimited_quota,omitempty"`
+	RemainQuota    int64    `json:"remain_quota,omitempty"`
+	ExpiredAt      int64    `json:"expired_at,omitempty"`
+	ModelLimits    []string `json:"model_limits,omitempty"`
+}
+
+// CreateTokenResponse partner 永远拿不到明文 sk-key，只有 masked + DeliveryHandle。
+type CreateTokenResponse struct {
+	TokenID        int64  `json:"token_id"`
+	MaskedKey      string `json:"masked_key"`
+	DeliveryHandle string `json:"delivery_handle"`
+}
+
+// TokenCreate POST /api/internal/token/create（integration §2.2.4）。
+func (c *Client) TokenCreate(ctx context.Context, req CreateTokenRequest, idemKey, traceID string) (*CreateTokenResponse, error) {
+	if req.UserID <= 0 {
+		return nil, errors.New("fyapi: user_id required")
+	}
+	if req.Name == "" {
+		return nil, errors.New("fyapi: name required")
+	}
+	if idemKey == "" {
+		return nil, errors.New("fyapi: idempotency key required")
+	}
+	var out CreateTokenResponse
+	if err := c.doAndDecode(ctx, Request{
+		Method:         http.MethodPost,
+		Path:           "/api/internal/token/create",
+		Body:           req,
+		IdempotencyKey: idemKey,
+		TraceID:        traceID,
+	}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GroupRatioOverrideUpsert POST /api/internal/group_ratio_override/upsert
+// （integration §2.2.6 — Fy-api router 实际用 POST，与 OpenAPI 文案的 PUT 不同；
+// 以 router/api-internal-router.go 为准）。
+func (c *Client) GroupRatioOverrideUpsert(ctx context.Context, fyUserID int64, group string, ratio float64, idemKey, traceID string) error {
+	if fyUserID <= 0 {
+		return errors.New("fyapi: fy_user_id required")
+	}
+	if group == "" {
+		return errors.New("fyapi: group required")
+	}
+	if ratio < 0 {
+		return errors.New("fyapi: ratio must be >= 0")
+	}
+	if idemKey == "" {
+		return errors.New("fyapi: idempotency key required")
+	}
+	body := map[string]interface{}{
+		"user_id": fyUserID,
+		"group":   group,
+		"ratio":   ratio,
+	}
+	return c.doAndDecode(ctx, Request{
+		Method:         http.MethodPost,
+		Path:           "/api/internal/group_ratio_override/upsert",
+		Body:           body,
+		IdempotencyKey: idemKey,
+		TraceID:        traceID,
+	}, nil)
 }
