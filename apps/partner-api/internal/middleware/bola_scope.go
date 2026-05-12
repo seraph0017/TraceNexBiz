@@ -1,23 +1,107 @@
-// BOLA scope middleware（backend §7.4 / Security CI #1）。
+// BOLA scope middleware（backend §7.4 / Security CI #1 / Round-1 CRIT-C5）。
 //
-// 强制原则：repository 层每个公共方法首参必须含 partner_id / customer_id / staff_id 之一作为
-// 显式 scope，防止"别家 partner 看到 X 的客户"类越权（OWASP API1 BOLA）。
+// 每个受保护路由必须通过 WithScope("partner_self" | "customer_self" | "staff_*") 显式声明
+// scope；未声明 scope 的路由通过此 middleware 时一律返 404（fail-closed）。
+//
 // 服务端越权统一返 BIZ_RES_NOT_FOUND（PRD §16.3，不暴露存在性）。
-//
-// CI gate（W1a 实现 golangci 自定义 analyzer）：
-//   - lint 名 `bola-scope-required`：扫描 internal/repository/*.go，断言公共方法首参签名命中
-//     `partnerID int64` / `customerID int64` / `staffID int64`，否则 fail-on-miss。
-//   - 等价的 e2e：partner B 访问 partner A 的 /customers/:id → 期望 404。
 package middleware
 
-import "github.com/gin-gonic/gin"
+import (
+	"net/http"
+	"strconv"
+	"strings"
 
-// BOLAScope 在 router level 把 actor scope 注入 ctx，repository 层取用。
-// W1a 实现：从 c.MustGet("jwt_claims") 拿 actor + 写 c.Set("scope_partner_id"|...)。
-func BOLAScope() gin.HandlerFunc {
+	"github.com/gin-gonic/gin"
+)
+
+// CtxKeyBOLAScope 路由 binding 设置的 scope 名（partner_self / customer_self / staff_*）。
+const CtxKeyBOLAScope = "bola_scope"
+
+// CtxKeyScopePartnerID 等：repository 层透传 scope 时使用。
+const (
+	CtxKeyScopePartnerID  = "scope_partner_id"
+	CtxKeyScopeCustomerID = "scope_customer_id"
+	CtxKeyScopeStaffID    = "scope_staff_id"
+)
+
+// BOLAAttemptLogger BOLA 违规时记录尝试（可选）。nil 时不记录。
+type BOLAAttemptLogger interface {
+	LogAttempt(actorType string, actorID int64, scope string, path string)
+}
+
+// BOLAScope 路由级 BOLA 强制。
+func BOLAScope(logger BOLAAttemptLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// TODO(W1a): per backend §7.4 — derive scope from actor type and inject into ctx.
-		//            Repository layer must read scope_* keys and ALWAYS WHERE-clause-filter.
+		scope := c.GetString(CtxKeyBOLAScope)
+		if scope == "" {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not_found"})
+			return
+		}
+		cl, ok := ClaimsFrom(c)
+		if !ok || cl == nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+		switch {
+		case scope == "partner_self":
+			if cl.ActorType != "partner" || !matchPathOrBodyID(c, "partner_id", cl.ActorID) {
+				bolaDeny(c, logger, cl, scope)
+				return
+			}
+			c.Set(CtxKeyScopePartnerID, cl.ActorID)
+		case scope == "customer_self":
+			if cl.ActorType != "customer" || !matchPathOrBodyID(c, "customer_id", cl.ActorID) {
+				bolaDeny(c, logger, cl, scope)
+				return
+			}
+			c.Set(CtxKeyScopeCustomerID, cl.ActorID)
+		case strings.HasPrefix(scope, "staff_"):
+			if cl.ActorType != "staff" {
+				bolaDeny(c, logger, cl, scope)
+				return
+			}
+			c.Set(CtxKeyScopeStaffID, cl.ActorID)
+		default:
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not_found"})
+			return
+		}
 		c.Next()
 	}
+}
+
+// WithScope 路由 builder helper：在 handler 前注入 bola_scope。
+//
+// 用法：r.GET("/partner/wallet", middleware.WithScope("partner_self"), walletGetHandler(...))
+func WithScope(scope string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Set(CtxKeyBOLAScope, scope)
+		c.Next()
+	}
+}
+
+// matchPathOrBodyID 检查路径参数（`:partner_id` / `:customer_id` / `:id`）与 claims.ActorID
+// 是否匹配；没有路径参数视为同 actor（actor-self 列表 / 详情）。
+func matchPathOrBodyID(c *gin.Context, key string, actorID int64) bool {
+	candidates := []string{key, strings.TrimSuffix(key, "_id"), "id"}
+	for _, k := range candidates {
+		v := c.Param(k)
+		if v == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return false
+		}
+		if n != actorID {
+			return false
+		}
+	}
+	return true
+}
+
+func bolaDeny(c *gin.Context, logger BOLAAttemptLogger, cl *Claims, scope string) {
+	if logger != nil {
+		logger.LogAttempt(cl.ActorType, cl.ActorID, scope, c.Request.URL.Path)
+	}
+	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 }

@@ -1,21 +1,35 @@
-// Idempotency middleware（backend §8.1 v0.2.2 重写：middleware 只做 SELECT 命中 + 重放，不写表）。
+// Idempotency middleware（backend §8 / integration §1.2 / Round-1 P0 fail-closed）。
 //
-// 设计要点（CRITICAL，与 ADR-003 一致）：
-//   1. 命中 completed → KMS Decrypt(response_cipher) 并 c.JSON 重放
-//   2. 命中 pending → 查 saga_step.status，in_progress 返 202，否则 500 orphaned
-//   3. 命中但 request_hash 不同 → 409 BIZ_IDEM_REUSED_DIFFERENT_BODY
-//   4. 未命中 → 注入 responseRecorder 到 c.Writer，c.Set ctxKeyIdemKey/Hash/Actor，c.Next()
-//   5. **不调 repo.Insert**；service 层在业务 TX 闭包内自己 idemRepo.Insert(tx, ...)
+// 实现简化版（W1a）：redis SETNX 24h TTL + 响应 replay。
+//   - 仅 POST/PUT/PATCH 强制；GET/DELETE 跳过
+//   - 必须带 Idempotency-Key header；缺失或非法 UUID → 400
+//   - per-actor namespace key：idem:{actor_type}:{actor_id}:{key}
+//   - SETNX 成功 → 运行 handler，记录响应到 redis 24h
+//   - SETNX 失败 → 取出已存响应回放（X-Tnb-Idempotent-Replay: 1）
+//   - redis 任何错误 → 503（fail-closed）
 //
-// W0 scaffold：仅给 wiring；命中检查 / 解密 / responseRecorder 由 W1a 实现。
+// 注：v0.2.2 的 KMS envelope 加密 + saga_step 状态分流由 W1b service 层在更复杂场景接管；
+// W1a middleware 仅保证 idempotent 语义不丢失。
 package middleware
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"regexp"
+	"time"
+
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 )
 
 // HeaderIdemKey state-changing endpoint 必带 idempotency-key header。
 const HeaderIdemKey = "Idempotency-Key"
+
+// HeaderIdemReplay replay 命中时的响应 marker（与 Fy-api 对齐）。
+const HeaderIdemReplay = "X-Tnb-Idempotent-Replay"
 
 // CtxKeyIdemKey / CtxKeyIdemReqHash / CtxKeyIdemActor 是 service 层取用的 ctx key.
 const (
@@ -24,12 +38,12 @@ const (
 	CtxKeyIdemActor   = "idem_actor"
 )
 
-// IdemRepoReader 由 internal/idempotency 提供的只读视图（middleware 仅 SELECT）。
+// IdemRepoReader 兼容 v0.2.2 设计（W1b service 层接管时使用）。
 type IdemRepoReader interface {
 	Find(c *gin.Context, actorType string, actorID int64, key, endpoint string) (*IdemRecord, error)
 }
 
-// IdemRecord 存量记录。
+// IdemRecord 存量记录（v0.2.2 兼容占位）。
 type IdemRecord struct {
 	Status         string
 	RequestHash    string
@@ -39,18 +53,108 @@ type IdemRecord struct {
 	SagaID         string
 }
 
-// KMSDecryptor 抽象 envelope 加密 service.
+// KMSDecryptor 抽象 envelope 加密 service（v0.2.2 兼容占位）。
 type KMSDecryptor interface {
 	Decrypt(cipher []byte, keyID string) ([]byte, error)
 }
 
-// Idempotency 装配只读检查 + responseRecorder 注入。
+// uuidRe 宽松 UUID 校验。
+var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+type idemPayload struct {
+	Status int    `json:"s"`
+	Body   []byte `json:"b"`
+	TS     int64  `json:"t"`
+}
+
+// Idempotency 装配 SETNX-based 幂等 middleware。
 //
-// W1a 实现：见 backend §8.1 v0.2.2 完整代码块（含 Insert 由 service 层闭包内执行的 invariant）。
-func Idempotency(_ IdemRepoReader, _ KMSDecryptor) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// TODO(W1a): per backend §8.1 v0.2.2 — SELECT-only check, response replay,
-		//            inject responseRecorder into c.Writer; service layer Insert in business TX.
-		c.Next()
+// ttl 推荐 24h（cfg.IdempotencyTTL）。
+func Idempotency(rds *redis.Client, ttl time.Duration) gin.HandlerFunc {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
 	}
+	return func(c *gin.Context) {
+		switch c.Request.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch:
+		default:
+			c.Next()
+			return
+		}
+		if rds == nil {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "idempotency_unavailable"})
+			return
+		}
+		key := c.GetHeader(HeaderIdemKey)
+		if key == "" || !uuidRe.MatchString(key) {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "idempotency_key_required"})
+			return
+		}
+		atStr := c.GetString(CtxKeyActorType)
+		aidNum, _ := c.Get(CtxKeyActorID)
+		aid, _ := aidNum.(int64)
+		if atStr == "" {
+			atStr = "anon"
+		}
+		redisKey := fmt.Sprintf("idem:%s:%d:%s", atStr, aid, key)
+
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+
+		ok, err := rds.SetNX(ctx, redisKey, "PENDING", ttl).Result()
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "idempotency_unavailable"})
+			return
+		}
+		c.Set(CtxKeyIdemKey, key)
+		c.Set(CtxKeyIdemActor, fmt.Sprintf("%s:%d", atStr, aid))
+
+		if !ok {
+			val, err := rds.Get(ctx, redisKey).Result()
+			if err != nil {
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "idempotency_unavailable"})
+				return
+			}
+			if val == "PENDING" || val == "" {
+				c.AbortWithStatusJSON(http.StatusAccepted, gin.H{"status": "in_progress"})
+				return
+			}
+			var p idemPayload
+			if err := json.Unmarshal([]byte(val), &p); err != nil {
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "idempotency_corrupt"})
+				return
+			}
+			c.Header(HeaderIdemReplay, "1")
+			c.Data(p.Status, "application/json", p.Body)
+			c.Abort()
+			return
+		}
+
+		rec := &idemResponseRecorder{ResponseWriter: c.Writer, body: &bytes.Buffer{}}
+		c.Writer = rec
+		c.Next()
+
+		status := rec.Status()
+		if status >= 200 && status < 300 {
+			payload, _ := json.Marshal(idemPayload{Status: status, Body: rec.body.Bytes(), TS: time.Now().Unix()})
+			_ = rds.Set(ctx, redisKey, payload, ttl).Err()
+		} else {
+			_ = rds.Del(ctx, redisKey).Err()
+		}
+	}
+}
+
+type idemResponseRecorder struct {
+	gin.ResponseWriter
+	body *bytes.Buffer
+}
+
+func (r *idemResponseRecorder) Write(b []byte) (int, error) {
+	r.body.Write(b)
+	return r.ResponseWriter.Write(b)
+}
+
+func (r *idemResponseRecorder) WriteString(s string) (int, error) {
+	r.body.WriteString(s)
+	return r.ResponseWriter.WriteString(s)
 }

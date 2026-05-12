@@ -24,8 +24,6 @@
 package handler
 
 import (
-	"errors"
-
 	"github.com/gin-gonic/gin"
 
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/auth"
@@ -90,35 +88,30 @@ func fail(c *gin.Context, status int, code string, msgZh, msgEn string) {
 	})
 }
 
-// scopeOf 从 ctx 取 actor（middleware 注入；W1c 实现 JWT middleware 后会填）。
+// scopeOf 从 ctx 取 actor。
 //
-// W1a 阶段允许 dev / curl 通过 query/header 直接 override 以方便 happy-path 联调。
+// 仅从 JWT middleware 注入的 claims 读取；X-Dev-Actor-* header bypass 已移除
+// （Round-1 SEC-CRIT-C3：dev header bypass 不应进 prod binary）。
 func scopeOf(c *gin.Context) (actorType auth.ActorType, actorID int64) {
-	if claims, ok := c.Get("jwt_claims"); ok {
-		if cl, ok := claims.(auth.Claims); ok {
+	// 1. middleware.ClaimsFrom（推荐路径，*middleware.Claims）
+	if v, ok := c.Get("jwt_claims"); ok {
+		switch cl := v.(type) {
+		case auth.Claims:
 			return auth.ActorType(cl.ActorType), cl.ActorID
+		case *auth.Claims:
+			if cl != nil {
+				return auth.ActorType(cl.ActorType), cl.ActorID
+			}
+		default:
+			// middleware package 类型（避免循环依赖，仅 reflect-like 字段读取）
+			type claimsLike interface {
+				GetActorType() string
+				GetActorID() int64
+			}
+			if cl, ok := v.(claimsLike); ok {
+				return auth.ActorType(cl.GetActorType()), cl.GetActorID()
+			}
 		}
-	}
-	if v := c.GetHeader("X-Dev-Actor-Type"); v != "" {
-		actorType = auth.ActorType(v)
-	}
-	if v := c.GetHeader("X-Dev-Actor-Id"); v != "" {
-		var n int64
-		_, _ = fmtSscan(v, &n)
-		actorID = n
 	}
 	return
-}
-
-// fmtSscan 简单 atoi（避免引入 strconv 依赖到 handler 顶层）。
-func fmtSscan(s string, out *int64) (int, error) {
-	var n int64
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, errors.New("not a number")
-		}
-		n = n*10 + int64(r-'0')
-	}
-	*out = n
-	return len(s), nil
 }

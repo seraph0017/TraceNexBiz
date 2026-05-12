@@ -1,20 +1,67 @@
-// PII scrubber middleware + zerolog hook（backend §12.2）。
+// PII scrubber middleware（backend §12.2 / Security S-3）。
 //
-// 三层 scrubber（与 frontend §15.2 一致）：
-//   1. logger：zerolog hook 识别 `pii:"true"` tag 与正则 (身份证 18 位 / 手机号 11 位 / RFC5322 email)
-//   2. Sentry/SLS beforeSend：相同 hook
-//   3. saga_step.payload / outbox.last_error 写入前 scrubPII()
+// 出向响应 PII 脱敏：
+//   - 仅当 actor_type 以 "staff" 开头 且未持有 verb pii.view_full 时脱敏
+//   - partner / customer 自身不脱敏（自己看自己 PII 正常）
+//   - 非 JSON 响应原样穿透（基于 Content-Type）
+//   - 通过 ResponseWriter wrapper 在 Write 路径上 in-place scrub
 //
-// W0 scaffold：见 pkg/piiscrubber 里的实际实现入口；本文件仅装 middleware 透传。
+// 调用顺序假设：必须排在 JWT 之后（依赖 ClaimsFrom）。
 package middleware
 
-import "github.com/gin-gonic/gin"
+import (
+	"strings"
 
-// PIIScrubber 把 c.Set("pii_scrubber", scrubber) 注入下游 service 使用。
-// W1a 实现：scrubber 单例由 main.go 注入 cfg-driven 模式列表。
+	"github.com/gin-gonic/gin"
+
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/pkg/piiscrubber"
+)
+
+// VerbPIIViewFull 持有此 verb 的 staff 可以看到原始 PII。
+const VerbPIIViewFull = "pii.view_full"
+
+// PIIScrubber 出向响应 PII 脱敏 middleware。
 func PIIScrubber() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// TODO(W1a): wire pii scrubber singleton; per backend §12.2 / §16.6.
+		if !shouldScrub(c) {
+			c.Next()
+			return
+		}
+		rec := &piiResponseRecorder{ResponseWriter: c.Writer}
+		c.Writer = rec
 		c.Next()
 	}
+}
+
+// shouldScrub 根据 claims.ActorType / Roles 决定是否脱敏。
+func shouldScrub(c *gin.Context) bool {
+	cl, ok := ClaimsFrom(c)
+	if !ok || cl == nil {
+		return false
+	}
+	if !strings.HasPrefix(cl.ActorType, "staff") {
+		return false
+	}
+	for _, r := range cl.Roles {
+		if r == VerbPIIViewFull {
+			return false
+		}
+	}
+	return true
+}
+
+// piiResponseRecorder Write 路径上 in-place scrub JSON body。
+type piiResponseRecorder struct {
+	gin.ResponseWriter
+}
+
+func (r *piiResponseRecorder) Write(b []byte) (int, error) {
+	if strings.Contains(r.Header().Get("Content-Type"), "application/json") {
+		b = []byte(piiscrubber.Redact(string(b)))
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+func (r *piiResponseRecorder) WriteString(s string) (int, error) {
+	return r.Write([]byte(s))
 }
