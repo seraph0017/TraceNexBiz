@@ -28,12 +28,15 @@ func allRowTypes() []any {
 		&partnerWalletRow{},
 		&walletHoldRow{},
 		&partnerWalletLogRow{},
+		&idempotencyRecordRow{},
 	}
 }
 
 // NewTestDB 起一份 fresh in-memory SQLite + AutoMigrate 全部业务表。
 //
 // 调用方拿到的是空库；如果 t.Cleanup 触发，gorm 内部的 sql.DB 自然释放。
+// 限制 max open conn = 1 — SQLite in-memory schema 是 per-connection；多并发 goroutine
+// 用 tx 时若拿到不同 connection 会看不到表（"no such table"）。
 func NewTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	gdb, err := gorm.Open(sqlite.Open(":memory:?_foreign_keys=on"), &gorm.Config{
@@ -41,6 +44,9 @@ func NewTestDB(t *testing.T) *gorm.DB {
 	})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
+	}
+	if sqlDB, err := gdb.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
 	}
 	if err := gdb.AutoMigrate(allRowTypes()...); err != nil {
 		t.Fatalf("automigrate: %v", err)

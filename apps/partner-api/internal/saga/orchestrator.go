@@ -57,14 +57,22 @@ func (o *orchestrator) Resume(sagaID string) (Saga, error) {
 // SweepResult 一次 sweep 的统计。
 type SweepResult struct {
 	Scanned   int
+	Retried   int // Fix-B' part 2: 实际 re-run fn 的 step 数
 	Escalated int
 	Skipped   int
 }
 
 // Sweep 单次扫描；retry worker 在外层 ticker 调用。
 //
-// 注意：Sweep 不实际重做业务 fn —— 仅判断 escalation。重做需调用方注册 saga handler（W1a 后续）。
-// W1b 范围只保证 escalation 决策可独立运行，便于 chaos test。
+// Fix-B' part 2 CRIT-B2：本扫描真正 re-run 业务 fn（之前的版本只 bump 状态）。
+// 流程：
+//  1. SELECT in_progress / failed step（attempts < MaxAttempts）
+//  2. 检查 backoff：now < updated_at + BackoffFor(attempts) → 跳过
+//  3. 检查 escalate 条件：max attempts / max wallclock → MarkEscalated 跳过
+//  4. 从 Payload envelope decode (kind, input)；kind 未知或 fn 未注册 → 跳过 + 计 Skipped
+//  5. 通过 LookupStep(kind, step_name) 找到 fn → 在新 instance 上 RunWithInput（保留 attempts）
+//
+// Skipped 含义在新版扩为 "had-no-effect-this-tick"：包含 backoff/未注册/transient-failure-but-未达max。
 func (o *orchestrator) Sweep(ctx context.Context, batch int) (SweepResult, error) {
 	if batch <= 0 {
 		batch = 100
@@ -87,7 +95,30 @@ func (o *orchestrator) Sweep(ctx context.Context, batch int) (SweepResult, error
 			res.Escalated++
 			continue
 		}
-		res.Skipped++
+		// Backoff 闸：上次更新 + BackoffFor(attempts) 还未到。
+		if step.Attempts > 0 && now.Sub(step.UpdatedAt) < BackoffFor(step.Attempts) {
+			res.Skipped++
+			continue
+		}
+		// Decode payload envelope；未持久化 input 的 step（legacy Run 调用）只能 Skipped。
+		kind, input, err := decodePayloadEnvelope(step.Payload)
+		if err != nil || kind == "" {
+			res.Skipped++
+			continue
+		}
+		fn := LookupStep(kind, step.StepName)
+		if fn == nil {
+			res.Skipped++
+			continue
+		}
+		// 构造临时 instance 重放；不走 Resume（已知 kind）。
+		inst := newInstance(step.SagaID, kind, o.repo, o.tx, o.scrubber)
+		if _, err := inst.RunWithInput(ctx, step.StepName, input, fn); err != nil {
+			// RunWithInput 内部已写 attempts++ + failed；不计入 Skipped（视为 Retried）。
+			res.Retried++
+			continue
+		}
+		res.Retried++
 	}
 	return res, nil
 }

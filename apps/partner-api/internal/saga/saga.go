@@ -84,6 +84,10 @@ type Saga interface {
 	Kind() Kind
 	// Run 推进一个业务步骤；committed 后再次调用直接返回已有结果（幂等）。
 	Run(ctx context.Context, step string, fn TxFn) (any, error)
+	// RunWithInput 推进 step 并持久化 input bytes 到 saga_step.Payload。
+	// retry sweep 通过 RegisterStep 找回 fn + 已落库 input 自动重放。
+	// Fix-B' part 2 CRIT-B2 的核心入口。
+	RunWithInput(ctx context.Context, step string, input []byte, fn StepFunc) (any, error)
 	// Compensate 触发某 step 的补偿；不可对未 committed 的 step 调用。
 	Compensate(ctx context.Context, step string, fn CompensateFn) (any, error)
 	// Steps 当前所有 step 快照（深拷贝；调用方 mutate 不影响内部）。
@@ -96,6 +100,8 @@ type Orchestrator interface {
 	NewSaga(idemKey string, kind Kind) (Saga, error)
 	// Resume 用已有 saga_id 挂载；用于 retry worker。
 	Resume(sagaID string) (Saga, error)
+	// Sweep 单次扫描 retryable step → 通过 registry 实际 re-run fn（Fix-B' part 2 CRIT-B2）。
+	Sweep(ctx context.Context, batch int) (SweepResult, error)
 }
 
 // Repository saga_step 持久化抽象（与 internal/repository.SagaRepository 对齐）。

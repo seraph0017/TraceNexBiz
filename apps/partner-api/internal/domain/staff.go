@@ -60,6 +60,9 @@ type PasswordResetToken struct {
 }
 
 // IdempotencyRecord PRD §8.16。
+//
+// Fix-B' part 2 (CRIT-B3): same-TX co-commit semantics.
+// ResponseBody 与 ResponseCipher 互斥：phase-1 走 ResponseBody 明文，Fix-C KMS 真接入后切 ResponseCipher。
 type IdempotencyRecord struct {
 	ID             int64
 	ActorType      string
@@ -69,6 +72,7 @@ type IdempotencyRecord struct {
 	RequestHash    string
 	ResponseStatus int
 	ResponseHash   string
+	ResponseBody   string // Phase-1 plaintext; KMS-encrypted path uses ResponseCipher instead.
 	ResponseCipher []byte
 	ResponseKeyID  string
 	TraceID        string

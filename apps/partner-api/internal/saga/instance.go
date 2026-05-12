@@ -8,6 +8,8 @@ package saga
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -16,6 +18,14 @@ import (
 
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/domain"
 )
+
+// payloadEnvelope wraps step input for persistence so retry sweep can recover
+// (Kind, Input) without an extra DB column. PIIScrubber is applied to errors,
+// not payloads, so JSON marshal is safe — but caller must NOT put raw PII in input.
+type payloadEnvelope struct {
+	Kind  Kind            `json:"k"`
+	Input json.RawMessage `json:"i,omitempty"`
+}
 
 // Transactor 抽象 bizDB.Transaction(...)；让 saga 包不强依赖 *gorm.DB（测试可注入）.
 type Transactor interface {
@@ -140,6 +150,99 @@ func (i *instance) Run(ctx context.Context, step string, fn TxFn) (any, error) {
 		return result, fmt.Errorf("saga: step %s committed but save status failed: %w", step, err)
 	}
 	return result, nil
+}
+
+// RunWithInput 是 Run 的可重入版本：第一次写入 input + kind 到 saga_step.Payload，
+// 失败时 retry sweep 可从 registry 找回 StepFunc + 已落库 input 重新执行。
+//
+// 推荐 service 层用 RunWithInput 替代 Run，以便 transient 失败自动恢复。
+// 已注册 fn 通过 RegisterStep(kind, step, fn) 静态登记。
+//
+// 实现核心差异：
+//   - 持久化 input 字节串到 Payload（JSON envelope，含 kind）
+//   - committed → 跳过；in_progress（曾运行未完成）允许 retry；failed → bumps attempts 重试
+//   - 永久错误（errors.Is(err, ErrPermanent)) 立即 escalate，不计 retry
+func (i *instance) RunWithInput(ctx context.Context, step string, input []byte, fn StepFunc) (any, error) {
+	if step == "" || fn == nil {
+		return nil, fmt.Errorf("saga: step name and fn required")
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	existing, err := i.repo.GetStep(ctx, i.id, step)
+	if err != nil && err != ErrStepNotFound {
+		return nil, fmt.Errorf("saga: get step %s: %w", step, err)
+	}
+	if existing != nil {
+		switch Status(existing.Status) {
+		case StatusCommitted:
+			return nil, nil
+		case StatusEscalated:
+			return nil, ErrSagaEscalated
+		case StatusCompensated:
+			return nil, fmt.Errorf("saga: step %s already compensated: %w", step, ErrInvalidTransition)
+		}
+	}
+
+	now := time.Now().UTC()
+	pending := i.snapshotStarting(existing, step, now)
+	// payload envelope: 写入仅一次（首次），后续 retry 复用已持久化的字节。
+	if existing == nil || existing.Payload == "" {
+		env := payloadEnvelope{Kind: i.kind, Input: input}
+		b, err := json.Marshal(env)
+		if err == nil {
+			scrubbed := string(b)
+			if i.scrubber != nil {
+				scrubbed = i.scrubber.Scrub(scrubbed)
+			}
+			pending.Payload = scrubbed
+		}
+	} else {
+		pending.Payload = existing.Payload
+	}
+	if err := i.repo.Save(ctx, &pending); err != nil {
+		return nil, fmt.Errorf("saga: mark in_progress: %w", err)
+	}
+
+	r, txErr := i.tx.WithTx(ctx, func(tx *gorm.DB) (any, error) {
+		return fn(ctx, tx, input)
+	})
+	if txErr != nil {
+		// 永久错误立刻 escalate（不浪费 retry budget）。
+		if errors.Is(txErr, ErrPermanent) {
+			failed := i.snapshotFailed(&pending, txErr.Error(), now)
+			_ = i.repo.Save(ctx, &failed)
+			_ = i.repo.MarkEscalated(ctx, i.id, step, "permanent_error")
+			return nil, fmt.Errorf("saga: step %s permanent error: %w", step, txErr)
+		}
+		failed := i.snapshotFailed(&pending, txErr.Error(), now)
+		if saveErr := i.repo.Save(ctx, &failed); saveErr != nil {
+			return nil, fmt.Errorf("saga: step %s failed (save also failed: %v): %w", step, saveErr, txErr)
+		}
+		if escalate, reason := ShouldEscalate(&failed, now); escalate {
+			_ = i.repo.MarkEscalated(ctx, i.id, step, reason)
+			return nil, fmt.Errorf("saga: step %s escalated (%s): %w", step, reason, ErrSagaEscalated)
+		}
+		return nil, fmt.Errorf("saga: step %s tx failed: %w", step, txErr)
+	}
+
+	committed := i.snapshotCommitted(&pending, now)
+	if err := i.repo.Save(ctx, &committed); err != nil {
+		return r, fmt.Errorf("saga: step %s committed but save status failed: %w", step, err)
+	}
+	return r, nil
+}
+
+// decodePayloadEnvelope retry sweep 用：从 step.Payload 恢复 (Kind, Input)。
+func decodePayloadEnvelope(payload string) (Kind, []byte, error) {
+	if payload == "" {
+		return "", nil, nil
+	}
+	var env payloadEnvelope
+	if err := json.Unmarshal([]byte(payload), &env); err != nil {
+		return "", nil, err
+	}
+	return env.Kind, env.Input, nil
 }
 
 // Compensate 触发已 committed step 的补偿。

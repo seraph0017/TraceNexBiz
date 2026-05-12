@@ -81,11 +81,18 @@ type AuditRepository interface {
 }
 
 // IdempotencyRepository backend §3.16 / §8.1 v0.2.2.
+//
+// Fix-B' part 2 (CRIT-B3): InsertWithinTx 必须在业务 tx 内调用；UNIQUE 冲突 = 重复请求。
 type IdempotencyRepository interface {
 	Find(ctx context.Context, actorType string, actorID int64, key, endpoint string) (*domain.IdempotencyRecord, error)
-	// Insert 由 service 在业务 TX 内部调用；签名带 tx 参数。
-	// TODO(W1a): Insert(tx Tx, rec *domain.IdempotencyRecord) error.
+	// InsertWithinTx 在调用方提供的 *gorm.DB（业务 tx）中插入一条 idempotency_record。
+	// 返回 ErrDuplicateKey（包装 gorm.ErrDuplicatedKey / MySQL 1062）→ 调用方应回滚业务写并
+	// 重 Find 取已落库结果回放。
+	InsertWithinTx(tx *gorm.DB, rec *domain.IdempotencyRecord) error
 }
+
+// ErrDuplicateKey 重复 Idempotency-Key 触发 UNIQUE 冲突；caller 重试 Find。
+var ErrDuplicateKey = errors.New("repository: duplicate idempotency key")
 
 // SagaRepository backend §3.17.
 type SagaRepository interface {
