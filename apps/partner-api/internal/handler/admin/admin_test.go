@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/middleware"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/content_safety"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/invoice"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/saga_admin"
@@ -53,6 +54,10 @@ func newTestRouter(t *testing.T) (*gin.Engine, Deps) {
 	rg.Use(func(c *gin.Context) {
 		c.Set("staff_id", int64(1))
 		c.Set("staff_role", "super_admin")
+		// 装载 JWT claims（WithScope 内 BOLA 需要 ClaimsFrom）
+		c.Set(middleware.CtxKeyJWTClaims, &middleware.Claims{
+			ActorType: "staff", ActorID: 1, Jti: "test-jti",
+		})
 		c.Next()
 	})
 	Register(rg, deps)

@@ -174,6 +174,41 @@ type Stub struct{}
 // NewStub 返回 W0 stub；W1d 应替换为 NewAliyunKMS(cfg)。
 func NewStub() Service { return &Stub{} }
 
+// New 工厂方法：按 env + provider 选 KMS 实现。
+//
+// 规则：
+//   - env == "dev" 且 provider == "local"   → NewLocalKMS (要求 KMS_LOCAL_DEV=true)
+//   - env == "dev" 且 provider == ""        → NewStub (零配置 dev)
+//   - env != "dev" 必须 provider == "aliyun" (其它 provider 一律拒绝)
+//
+// 任何 prod / staging 启动时若 provider != "aliyun" 立即返回 error，让 main.go fail-fast。
+func New(env, provider string) (Service, error) {
+	if env != "dev" && env != "staging" && env != "prod" {
+		return nil, fmt.Errorf("kms: unknown env %q", env)
+	}
+	switch env {
+	case "dev":
+		switch provider {
+		case "", "stub":
+			return NewStub(), nil
+		case "local":
+			return NewLocalKMS(), nil
+		case "aliyun":
+			// dev 可选接真 KMS（端到端调试）
+			return nil, errors.New("kms: aliyun in dev requires NewAliyunKMS(cfg) call, not factory shortcut")
+		default:
+			return nil, fmt.Errorf("kms: unknown provider %q for dev", provider)
+		}
+	default:
+		// staging / prod
+		if provider != "aliyun" {
+			return nil, fmt.Errorf("kms: env=%s forbids provider=%q (must be aliyun)", env, provider)
+		}
+		// caller 必须直接调用 NewAliyunKMS(cfg.KMS.*)；本工厂只验枚举。
+		return nil, errors.New("kms: env=prod/staging requires NewAliyunKMS(cfg) call directly")
+	}
+}
+
 func (s *Stub) Encrypt(_ context.Context, scope string, plaintext []byte) ([]byte, string, error) {
 	// TODO(W1d): per backend §9.1 接 Aliyun KMS Encrypt + 缓存 DEK by (scope, version)
 	return plaintext, "stub:" + scope + ":v0", nil

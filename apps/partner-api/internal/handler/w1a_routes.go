@@ -26,6 +26,7 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/middleware"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/auth"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/customer"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/invitation"
@@ -45,33 +46,40 @@ type W1aDeps struct {
 }
 
 // RegisterW1aRoutes 把 W1a 全部路由挂到 gin.Engine（W1c 的 admin / customer / partner middleware 在外层挂）。
+//
+// 每条路由前置 middleware.WithScope(scope) — BOLA middleware (在 main.go group 上挂) 据此 enforce。
+// scope 命名约定：
+//   - "public"          /public/* — 不要求 JWT
+//   - "partner_self"    actor=partner 自身
+//   - "customer_self"   actor=customer 自身
+//   - "staff_admin"     actor=staff（具体 RBAC 角色由 service 层校）
 func RegisterW1aRoutes(r *gin.Engine, d W1aDeps) {
 	pub := r.Group("/public")
-	pub.POST("/auth/login", loginHandler(d.Auth))
-	pub.POST("/auth/logout", logoutHandler(d.Auth))
-	pub.POST("/auth/refresh", refreshHandler(d.Auth))
-	pub.POST("/auth/password/forgot", passwordForgotHandler(d.Auth))
-	pub.POST("/auth/password/reset", passwordResetHandler(d.Auth))
-	pub.POST("/partner/apply", partnerApplyHandler(d.Partner))
-	pub.POST("/customer/register", customerRegisterHandler(d.Customer))
+	pub.POST("/auth/login", middleware.WithScope("public"), loginHandler(d.Auth))
+	pub.POST("/auth/logout", middleware.WithScope("public"), logoutHandler(d.Auth))
+	pub.POST("/auth/refresh", middleware.WithScope("public"), refreshHandler(d.Auth))
+	pub.POST("/auth/password/forgot", middleware.WithScope("public"), passwordForgotHandler(d.Auth))
+	pub.POST("/auth/password/reset", middleware.WithScope("public"), passwordResetHandler(d.Auth))
+	pub.POST("/partner/apply", middleware.WithScope("public"), partnerApplyHandler(d.Partner))
+	pub.POST("/customer/register", middleware.WithScope("public"), customerRegisterHandler(d.Customer))
 
 	p := r.Group("/partner")
-	p.GET("/me", partnerMeHandler(d.Partner))
-	p.GET("/wallet", walletGetHandler(d.Wallet))
-	p.GET("/wallet/logs", walletLogsHandler(d.Wallet))
-	p.POST("/invitation", invitationGenerateHandler(d.Invitation))
-	p.GET("/invitation", invitationListHandler(d.Invitation))
-	p.POST("/kyc", kycSubmitHandler(d.KYC))
+	p.GET("/me", middleware.WithScope("partner_self"), partnerMeHandler(d.Partner))
+	p.GET("/wallet", middleware.WithScope("partner_self"), walletGetHandler(d.Wallet))
+	p.GET("/wallet/logs", middleware.WithScope("partner_self"), walletLogsHandler(d.Wallet))
+	p.POST("/invitation", middleware.WithScope("partner_self"), invitationGenerateHandler(d.Invitation))
+	p.GET("/invitation", middleware.WithScope("partner_self"), invitationListHandler(d.Invitation))
+	p.POST("/kyc", middleware.WithScope("partner_self"), kycSubmitHandler(d.KYC))
 
 	c := r.Group("/customer")
-	c.POST("/kyc", kycSubmitHandler(d.KYC))
-	c.POST("/transfer", customerTransferHandler(d.Customer))
-	c.POST("/erase", customerEraseHandler(d.Customer))
+	c.POST("/kyc", middleware.WithScope("customer_self"), kycSubmitHandler(d.KYC))
+	c.POST("/transfer", middleware.WithScope("customer_self"), customerTransferHandler(d.Customer))
+	c.POST("/erase", middleware.WithScope("customer_self"), customerEraseHandler(d.Customer))
 
 	a := r.Group("/admin")
-	a.POST("/partners/:id/approve", partnerApproveHandler(d.Partner))
-	a.POST("/partners/:id/terminate", partnerTerminateHandler(d.Partner))
-	a.POST("/kyc/:id/review", kycReviewHandler(d.KYC))
+	a.POST("/partners/:id/approve", middleware.WithScope("staff_admin"), partnerApproveHandler(d.Partner))
+	a.POST("/partners/:id/terminate", middleware.WithScope("staff_admin"), partnerTerminateHandler(d.Partner))
+	a.POST("/kyc/:id/review", middleware.WithScope("staff_compliance"), kycReviewHandler(d.KYC))
 }
 
 // 封装 success / fail envelope（与 backend §11 / pkg/errors 对齐）。

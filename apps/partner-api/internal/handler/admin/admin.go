@@ -24,6 +24,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/middleware"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/content_safety"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/invoice"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/saga_admin"
@@ -43,22 +44,26 @@ type Deps struct {
 // Register 在 gin.RouterGroup 上挂 admin 端点.
 //
 // 调用方负责在 group 上预先挂好：JWT (staff) + IP allowlist + Audit middleware.
+// 每条路由前置 middleware.WithScope 声明 BOLA scope：
+//   - invoice / saga / staff 操作 → staff_finance
+//   - content_safety / KYC → staff_compliance
+//   - 通用 admin / ticket → staff_admin
 func Register(rg *gin.RouterGroup, deps Deps) {
-	rg.POST("/invoice/:id/review", invoiceReview(deps.Invoice))
-	rg.POST("/invoice/:id/issue", invoiceIssue(deps.Invoice))
-	rg.POST("/invoice/:id/red-flush", invoiceRedFlush(deps.Invoice))
+	rg.POST("/invoice/:id/review", middleware.WithScope("staff_finance"), invoiceReview(deps.Invoice))
+	rg.POST("/invoice/:id/issue", middleware.WithScope("staff_finance"), invoiceIssue(deps.Invoice))
+	rg.POST("/invoice/:id/red-flush", middleware.WithScope("staff_finance"), invoiceRedFlush(deps.Invoice))
 
-	rg.GET("/tickets", ticketList(deps.Ticket))
-	rg.POST("/tickets/:id/assign", ticketAssign(deps.Ticket))
+	rg.GET("/tickets", middleware.WithScope("staff_admin"), ticketList(deps.Ticket))
+	rg.POST("/tickets/:id/assign", middleware.WithScope("staff_admin"), ticketAssign(deps.Ticket))
 
-	rg.GET("/content-safety/reports", csReportsList(deps.ContentSafety))
-	rg.POST("/content-safety/reports/:id/retry", csReportRetry(deps.ContentSafety))
-	rg.POST("/content-safety/reports/dispatch", csReportDispatch(deps.ContentSafety))
+	rg.GET("/content-safety/reports", middleware.WithScope("staff_compliance"), csReportsList(deps.ContentSafety))
+	rg.POST("/content-safety/reports/:id/retry", middleware.WithScope("staff_compliance"), csReportRetry(deps.ContentSafety))
+	rg.POST("/content-safety/reports/dispatch", middleware.WithScope("staff_compliance"), csReportDispatch(deps.ContentSafety))
 
-	rg.POST("/staff", staffCreate(deps.Staff))
+	rg.POST("/staff", middleware.WithScope("staff_admin"), staffCreate(deps.Staff))
 
-	rg.POST("/staff/approver-tokens", issueApproverToken(deps.SagaAdmin))
-	rg.POST("/saga/:id/force-resolve", sagaForceResolve(deps.SagaAdmin))
+	rg.POST("/staff/approver-tokens", middleware.WithScope("staff_admin"), issueApproverToken(deps.SagaAdmin))
+	rg.POST("/saga/:id/force-resolve", middleware.WithScope("staff_finance"), sagaForceResolve(deps.SagaAdmin))
 }
 
 // Envelope per integration §8.1.

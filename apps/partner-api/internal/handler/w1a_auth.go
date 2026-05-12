@@ -8,9 +8,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/config"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/middleware"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/auth"
 )
+
+// cookieSecure 在 dev 环境关闭 Secure（HTTP 本地调试可用）；staging / prod 强制开启.
+//
+// 与 config.Env 同步；W0 阶段没有 config 注入到 handler 包，提供包级 setter
+// 由 main.go 在启动时调用一次。默认 true（fail-secure：未注入即视为 prod）。
+var cookieSecure = true
+
+// SetCookieSecure 主程序在 cfg.Env != "dev" 时保持 true；env=dev 改为 false.
+func SetCookieSecure(env string) {
+	cookieSecure = env != config.EnvDev
+}
 
 type loginBody struct {
 	Site     string `json:"site" binding:"required"`
@@ -142,20 +154,25 @@ func passwordResetHandler(s *auth.Service) gin.HandlerFunc {
 
 // setAuthCookies 写三 cookie（httpOnly access / refresh + non-httpOnly csrf）。
 //
-// 与 frontend §6.2 / backend §7.6 一致：SameSite=Lax / Path=/ / Secure=cfg。
+// 与 frontend §6.2 / backend §7.6 一致：
+//   - SameSite=Lax
+//   - Path=/
+//   - Secure：dev=false，staging/prod=true（main.go 通过 SetCookieSecure 配置）
+//   - access/refresh: HttpOnly=true（防 XSS）
+//   - csrf:           HttpOnly=false（前端 JS 需要回写 X-Csrf-Token header）
 func setAuthCookies(c *gin.Context, out auth.LoginOutput) {
 	maxAge := int(time.Until(out.ExpiresAt).Seconds())
 	if maxAge < 0 {
 		maxAge = 0
 	}
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie(middleware.CookieAccess, out.AccessToken, maxAge, "/", "", false, true)
-	c.SetCookie(middleware.CookieRefresh, out.RefreshToken, maxAge*8, "/", "", false, true)
-	c.SetCookie(middleware.CookieCSRF, out.CSRFToken, maxAge*8, "/", "", false, false)
+	c.SetCookie(middleware.CookieAccess, out.AccessToken, maxAge, "/", "", cookieSecure, true)
+	c.SetCookie(middleware.CookieRefresh, out.RefreshToken, maxAge*8, "/", "", cookieSecure, true)
+	c.SetCookie(middleware.CookieCSRF, out.CSRFToken, maxAge*8, "/", "", cookieSecure, false)
 }
 
 func clearAuthCookies(c *gin.Context) {
-	c.SetCookie(middleware.CookieAccess, "", -1, "/", "", false, true)
-	c.SetCookie(middleware.CookieRefresh, "", -1, "/", "", false, true)
-	c.SetCookie(middleware.CookieCSRF, "", -1, "/", "", false, false)
+	c.SetCookie(middleware.CookieAccess, "", -1, "/", "", cookieSecure, true)
+	c.SetCookie(middleware.CookieRefresh, "", -1, "/", "", cookieSecure, true)
+	c.SetCookie(middleware.CookieCSRF, "", -1, "/", "", cookieSecure, false)
 }

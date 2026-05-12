@@ -4,11 +4,13 @@
 //   handler → service → repository → infra
 //
 // 关键中间件链（per backend §7.1）：
-//   RequestID → CORS → SecurityHeaders → BodyLimit → Tracing
-//   → JWT (cookie tnbiz_access) → CSRF (double-submit) → Scope → Permission
-//   → Idempotency → Handler
+//   全局：    RequestID → CORS → SecurityHeaders → Audit
+//   /partner /customer /admin（path-scoped）：
+//             + JWT → CSRF → PIIScrubber → Idempotency → BOLAScope
+//   /webhook： + WebhookIdempotency
+//   /public：  仅全局（无鉴权）
 //
-// W0 scaffold：仅完成 wiring + healthz + TODO route 占位；业务 handler / service body 留 TODO。
+// W1a 完成 7 middleware + 全部 WithScope 装配；W1c 接 KMS / 真 fyapi.Client。
 package main
 
 import (
@@ -17,10 +19,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
@@ -28,7 +32,8 @@ import (
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/domain"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/handler"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/db"
-	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/redis"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/kms"
+	infraredis "github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/redis"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/middleware"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/auth"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/customer"
@@ -47,22 +52,28 @@ func main() {
 		log.Fatal().Err(err).Msg("config.Load failed")
 	}
 
+	// dev 环境 cookie Secure=false；staging/prod 强制 true。
+	handler.SetCookieSecure(cfg.Env)
+
 	// W0：infra 用 best-effort 初始化；缺依赖时不阻塞 /healthz
 	bizDB, fyDB, dbErr := db.Open(cfg)
 	if dbErr != nil {
 		log.Warn().Err(dbErr).Msg("db.Open failed; running in degraded mode (W0 only)")
 	}
-	rdb, redisErr := redis.Open(cfg)
+	rdb, redisErr := infraredis.Open(cfg)
 	if redisErr != nil {
 		log.Warn().Err(redisErr).Msg("redis.Open failed; running in degraded mode (W0 only)")
 	}
-	// W1c agent 在此处构造 service / repository / fyapi client 并 wire 进 handler；
-	// W0 仅装载基础 router + healthz。
+
+	// KMS 装配（per ADR-009）。
+	// dev 默认 stub；staging/prod 必须 aliyun。
+	kmsSvc := mustBuildKMS(cfg)
+	_ = kmsSvc // W1c：服务层 inject
+
 	_ = bizDB
 	_ = fyDB
-	_ = rdb
 
-	router := buildRouter(cfg)
+	router := buildRouter(cfg, rdb)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTP.Addr,
@@ -94,35 +105,174 @@ func main() {
 	log.Info().Msg("partner-api stopped")
 }
 
+func mustBuildKMS(cfg *config.Config) kms.Service {
+	kmsProvider := os.Getenv("KMS_PROVIDER")
+	if kmsProvider == "" {
+		if cfg.Env == config.EnvDev {
+			kmsProvider = "stub"
+		} else {
+			kmsProvider = "aliyun"
+		}
+	}
+	if cfg.Env == config.EnvDev {
+		k, err := kms.New(cfg.Env, kmsProvider)
+		if err != nil {
+			log.Fatal().Err(err).Msg("kms init failed")
+		}
+		return k
+	}
+	// staging / prod：直接构造 AliyunKMS（factory 故意拒绝以避免误拿 stub）。
+	if cfg.KMS.Endpoint == "" || cfg.KMS.KeyID == "" {
+		log.Fatal().Msg("KMS_ENDPOINT / KMS_KEY_ID required in staging/prod")
+	}
+	return kms.NewAliyunKMS(cfg.KMS.Endpoint, cfg.KMS.KeyID, cfg.KMS.Region, cfg.KMS.AccessKey, cfg.KMS.AccessSecret)
+}
+
 // buildRouter 装配 gin engine + 全局 middleware + 路由组。
 //
-// 详细路由表见 internal/handler。
-func buildRouter(cfg *config.Config) http.Handler {
+// rdb 可为 nil（dev 起步无 Redis）；nil 时 idempotency / webhook idempotency 会 fail-closed 返 503。
+//
+// 中间件挂载顺序（必须在 RegisterRoutes 之前）：
+//
+//  1. r.Use(global...)             RequestID / CORS / SecurityHeaders / Audit
+//  2. r.Use(scopedChainByPath...)  对 /partner /customer /admin 走 JWT/CSRF/PII/Idem/BOLA
+//  3. r.Use(webhookScopedByPath)   对 /webhook 走 WebhookIdempotency
+//  4. r.GET("/healthz", ...)
+//  5. handler.RegisterW1aRoutes(r, ...)
+//  6. handler.RegisterTODORoutes(r)
+func buildRouter(cfg *config.Config, rdb *redis.Client) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	// 全局 middleware（per backend §7.1）；
-	// W1a 在每个 group 内补 JWT / CSRF / Scope / Permission。
+	// ---- 全局 middleware（per backend §7.1） ----
 	r.Use(middleware.RequestID())
-	r.Use(middleware.SecurityHeaders())
 	r.Use(middleware.CORS(cfg.AllowedOrigins))
+	r.Use(middleware.SecurityHeaders())
 
-	// healthz（per backend §13.3）
+	// Audit sink：drop-on-overflow，1024 buffer；W1c sealer 接 MySQL。
+	auditSink := middleware.NewBufferedSink(1024, func(e middleware.AuditEntry) {
+		log.Info().
+			Str("actor_type", e.ActorType).
+			Int64("actor_id", e.ActorID).
+			Str("method", e.Method).
+			Str("path", e.Path).
+			Int("status", e.Status).
+			Str("trace_id", e.RequestID).
+			Msg("audit")
+	})
+	r.Use(middleware.Audit(auditSink))
+
+	// ---- 鉴权依赖构造（fail-fast） ----
+	verifier := mustBuildVerifier(cfg)
+	revStore := mustBuildRevocation(cfg, rdb)
+	bolaLogger := bolaLoggerFunc{}
+	clk := func() int64 { return time.Now().Unix() }
+
+	// 鉴权链（path-scoped 装载）。
+	//
+	// 注：BOLAScope 不在此链 — WithScope 在每条路由上声明 scope 时已经 inline enforce。
+	// 如果想加 fail-closed safety net（catch 漏挂 WithScope 的路由），可在 chain 末尾再挂
+	// middleware.BOLAScope(bolaLogger) — 它会读取 ctx 中的 scope（无 scope → 404）。
+	authedChain := []gin.HandlerFunc{
+		middleware.JWT(verifier, revStore, clk),
+		middleware.CSRF(),
+		middleware.PIIScrubber(),
+		middleware.Idempotency(rdb, cfg.IdempotencyTTL),
+	}
+	_ = bolaLogger
+
+	// 把每个鉴权 middleware 包成 path-filtered，逐个 r.Use 注册。
+	// 这样 gin 的 c.Next() 能正确推进 → 下一个 mw → ... → handler；
+	// 而非鉴权路径（/healthz / /public/* / /webhook/*）直接 skip。
+	for _, mw := range authedChain {
+		r.Use(filterByPrefix(mw, "/partner", "/customer", "/admin", "/api/sdk"))
+	}
+
+	// Webhook 链：独立 idempotency；只匹配 /webhook 前缀。
+	r.Use(filterByPrefix(middleware.WebhookIdempotency(rdb, cfg.InternalIdempotencyTTL), "/webhook"))
+
+	// ---- healthz（per backend §13.3）— 必须在鉴权链之后注册（healthz path 不匹配前缀） ----
 	r.GET("/healthz", handler.Healthz)
 	r.GET("/healthz/live", handler.HealthzLive)
 	r.GET("/healthz/ready", handler.HealthzReady)
 
 	// W1a：auth / partner / customer / kyc / wallet / invitation。
-	//
-	// dev 模式用全内存 repo + stub crypto/fyapi/notify；
-	// W1c JWT middleware 接入后由 staff / partner / customer site cookie 互斥。
 	handler.RegisterW1aRoutes(r, buildW1aDeps(cfg))
 
 	// TODO route 占位（per W0 验收）
 	handler.RegisterTODORoutes(r)
 
 	return r
+}
+
+// mustBuildVerifier 装配 JWT verifier；dev 缺 PEM 时降级到 devNullVerifier。
+func mustBuildVerifier(cfg *config.Config) middleware.Verifier {
+	if cfg.JWT.VerifyKeyPEM != "" {
+		v, err := middleware.NewRSAVerifier([]byte(cfg.JWT.VerifyKeyPEM))
+		if err != nil {
+			log.Fatal().Err(err).Msg("middleware.NewRSAVerifier failed (check JWT_VERIFY_KEY_PEM)")
+		}
+		return v
+	}
+	if cfg.Env != config.EnvDev {
+		log.Fatal().Msg("JWT_VERIFY_KEY_PEM required in staging/prod")
+	}
+	log.Warn().Msg("JWT_VERIFY_KEY_PEM not set — dev fallback verifier in use; tokens will NOT validate")
+	return devNullVerifier{}
+}
+
+// mustBuildRevocation 装配 jti revocation store；Redis 缺失时 dev 走 allow-all 占位。
+func mustBuildRevocation(cfg *config.Config, rdb *redis.Client) middleware.RevocationStore {
+	if rdb != nil {
+		return middleware.NewRedisRevocationStore(rdb, 1*time.Second)
+	}
+	if cfg.Env != config.EnvDev {
+		log.Fatal().Msg("Redis required in staging/prod for jti revocation (fail-closed)")
+	}
+	log.Warn().Msg("revocation store: Redis unavailable, using allow-all stub (dev only)")
+	return devAllowAllRevStore{}
+}
+
+// filterByPrefix 把一个 middleware 包成 path-prefix 触发：path 命中任一 prefix 才执行；否则直接 c.Next()。
+//
+// 这种包装让 gin 的中间件链按正常顺序执行：mw 自己调用 c.Next() 时会推进到下一个 mw，
+// 实现 group-scoped middleware 的等价语义，而不需要 r.Group。
+func filterByPrefix(mw gin.HandlerFunc, prefixes ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p := c.Request.URL.Path
+		for _, pre := range prefixes {
+			if strings.HasPrefix(p, pre) {
+				mw(c)
+				return
+			}
+		}
+		c.Next()
+	}
+}
+
+// devNullVerifier dev 阶段无 PEM 时的占位 — 始终拒绝。
+type devNullVerifier struct{}
+
+func (devNullVerifier) Verify(string) (*middleware.Claims, error) {
+	return nil, middleware.ErrTokenInvalid
+}
+
+// devAllowAllRevStore dev 阶段无 Redis 时的占位 — 始终放行。
+type devAllowAllRevStore struct{}
+
+func (devAllowAllRevStore) IsRevoked(string) (bool, error) { return false, nil }
+
+// bolaLoggerFunc BOLA 拒绝时记录 — W1c 接 SLS / Prometheus counter。
+type bolaLoggerFunc struct{}
+
+func (bolaLoggerFunc) LogAttempt(actorType string, actorID int64, scope, path string) {
+	log.Warn().
+		Str("actor_type", actorType).
+		Int64("actor_id", actorID).
+		Str("scope", scope).
+		Str("path", path).
+		Msg("bola_attempt")
 }
 
 // buildW1aDeps 装配 W1a service。
@@ -142,7 +292,6 @@ func buildW1aDeps(cfg *config.Config) handler.W1aDeps {
 
 	custRepo := customer.NewMemoryRepo()
 	custFy := customer.NewStubFyAPI()
-	// invitation port 适配：直接用 invitation.Service 暴露 Resolve / Consume 方法。
 	custSvc := customer.NewService(custRepo, &invitationAdapter{svc: invSvc}, custFy)
 
 	partnerSvc := partner.NewService(

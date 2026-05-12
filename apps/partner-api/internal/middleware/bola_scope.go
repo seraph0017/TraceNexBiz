@@ -29,54 +29,92 @@ type BOLAAttemptLogger interface {
 	LogAttempt(actorType string, actorID int64, scope string, path string)
 }
 
-// BOLAScope 路由级 BOLA 强制。
+// BOLAScope 路由级 BOLA 强制（保留以兼容旧测试 / 全局 fail-closed safety net）。
+//
+// 推荐用法已迁移到 WithScope(scope) — 单次声明 + enforce。本函数仅读取
+// 上一中间件（旧 WithScope 仅 set）注入的 scope，再执行同样的 enforce。
+//
+// 在新代码中：直接 r.GET(path, WithScope(scope), handler) 即可。
 func BOLAScope(logger BOLAAttemptLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		scope := c.GetString(CtxKeyBOLAScope)
-		if scope == "" {
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not_found"})
-			return
-		}
+		enforceBOLA(c, scope, logger)
+	}
+}
+
+// WithScope 路由 builder helper：声明 scope，并立即 enforce BOLA（不需要再单独挂 BOLAScope）。
+//
+// 用法：r.GET("/partner/wallet", middleware.WithScope("partner_self"), walletGetHandler(...))
+//
+// 设计选择：把"声明 scope"和"enforce BOLA"合并到同一 helper，避免漏挂。
+// 这样 BOLAScope 只在两种场景仍有意义：
+//   - 全局测试（assert 未声明 scope 的路由 fail-closed 404）
+//   - 兼容仍调用 BOLAScope 的旧测试代码（行为不变）
+func WithScope(scope string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Set(CtxKeyBOLAScope, scope)
+		// 立即 enforce（与 BOLAScope 同语义）。
+		enforceBOLA(c, scope, nil)
+	}
+}
+
+// WithScopeLogged 同 WithScope，但接受 logger（W1c 注入 SLS 时使用）。
+func WithScopeLogged(scope string, logger BOLAAttemptLogger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Set(CtxKeyBOLAScope, scope)
+		enforceBOLA(c, scope, logger)
+	}
+}
+
+// enforceBOLA 是 BOLAScope / WithScope 共享的实际策略实现。
+func enforceBOLA(c *gin.Context, scope string, logger BOLAAttemptLogger) {
+	if scope == "" {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not_found"})
+		return
+	}
+	if scope == "public" {
+		c.Next()
+		return
+	}
+	if scope == "sdk" || strings.HasPrefix(scope, "sdk_") {
 		cl, ok := ClaimsFrom(c)
 		if !ok || cl == nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}
-		switch {
-		case scope == "partner_self":
-			if cl.ActorType != "partner" || !matchPathOrBodyID(c, "partner_id", cl.ActorID) {
-				bolaDeny(c, logger, cl, scope)
-				return
-			}
-			c.Set(CtxKeyScopePartnerID, cl.ActorID)
-		case scope == "customer_self":
-			if cl.ActorType != "customer" || !matchPathOrBodyID(c, "customer_id", cl.ActorID) {
-				bolaDeny(c, logger, cl, scope)
-				return
-			}
-			c.Set(CtxKeyScopeCustomerID, cl.ActorID)
-		case strings.HasPrefix(scope, "staff_"):
-			if cl.ActorType != "staff" {
-				bolaDeny(c, logger, cl, scope)
-				return
-			}
-			c.Set(CtxKeyScopeStaffID, cl.ActorID)
-		default:
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not_found"})
+		_ = cl
+		c.Next()
+		return
+	}
+	cl, ok := ClaimsFrom(c)
+	if !ok || cl == nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	switch {
+	case scope == "partner_self":
+		if cl.ActorType != "partner" || !matchPathOrBodyID(c, "partner_id", cl.ActorID) {
+			bolaDeny(c, logger, cl, scope)
 			return
 		}
-		c.Next()
+		c.Set(CtxKeyScopePartnerID, cl.ActorID)
+	case scope == "customer_self":
+		if cl.ActorType != "customer" || !matchPathOrBodyID(c, "customer_id", cl.ActorID) {
+			bolaDeny(c, logger, cl, scope)
+			return
+		}
+		c.Set(CtxKeyScopeCustomerID, cl.ActorID)
+	case strings.HasPrefix(scope, "staff_"):
+		if cl.ActorType != "staff" {
+			bolaDeny(c, logger, cl, scope)
+			return
+		}
+		c.Set(CtxKeyScopeStaffID, cl.ActorID)
+	default:
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not_found"})
+		return
 	}
-}
-
-// WithScope 路由 builder helper：在 handler 前注入 bola_scope。
-//
-// 用法：r.GET("/partner/wallet", middleware.WithScope("partner_self"), walletGetHandler(...))
-func WithScope(scope string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Set(CtxKeyBOLAScope, scope)
-		c.Next()
-	}
+	c.Next()
 }
 
 // matchPathOrBodyID 检查路径参数（`:partner_id` / `:customer_id` / `:id`）与 claims.ActorID
