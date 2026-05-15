@@ -85,6 +85,7 @@ type Partner struct {
 	ContactName         string
 	// PII：手机号 KMS 信封加密（backend §3.1 + §9）
 	ContactPhonePlain  string // 仅 service 内瞬态；不出库不入日志
+	ContactPhoneCipher []byte
 	ContactPhoneKeyID  string
 	ContactEmail       string
 	ContactEmailHMAC   string // v0.2 ARCH M-8.1：HMAC(email) 索引

@@ -34,6 +34,28 @@ func TestApply_Happy(t *testing.T) {
 	}
 }
 
+func TestAdminCreate_NoConsentUsesSyntheticFyUser(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	p, err := svc.AdminCreate(context.Background(), ApplyInput{
+		Type:         "enterprise",
+		ContactName:  "Admin Created",
+		ContactPhone: "+8618616708172",
+		ContactEmail: "admin-created@test.com",
+	})
+	if err != nil {
+		t.Fatalf("admin create: %v", err)
+	}
+	if p.FyUserID >= 0 {
+		t.Fatalf("expected negative synthetic fy_user_id, got %d", p.FyUserID)
+	}
+	if p.InvitationCode == "" || p.ContactEmailHMAC == "" {
+		t.Fatalf("missing generated fields: %+v", p)
+	}
+	if p.TaxStatus != domain.TaxIndividual {
+		t.Fatalf("unexpected tax status: %q", p.TaxStatus)
+	}
+}
+
 func TestApply_DuplicateEmail(t *testing.T) {
 	svc, _, _ := newSvc(t)
 	in := ApplyInput{FyUserID: 1, Type: "individual", ContactName: "A",

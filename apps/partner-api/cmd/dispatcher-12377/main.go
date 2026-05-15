@@ -27,6 +27,7 @@ import (
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/config"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/db"
 	infraredis "github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/redis"
+	mysqlrepo "github.com/seraph0017/tracenexbiz/apps/partner-api/internal/repository/mysql"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/content_safety"
 	pkgleader "github.com/seraph0017/tracenexbiz/apps/partner-api/pkg/leader"
 )
@@ -58,10 +59,13 @@ func main() {
 		log.Warn().Err(dbErr).Msg("dispatcher-12377: bizDB unavailable; running with in-memory repo (dev)")
 	}
 
-	// content_safety service 装配。
-	// Phase-1：repo 走 MemoryRepo（service 层自带）+ noopAuthority；
-	// Phase-2：W1d 接 GORM repo + 真 12377 客户端.
-	svc := content_safety.NewService(content_safety.NewMemoryRepo(), noopAuthority{})
+	var repo content_safety.Repo
+	if bizDB != nil {
+		repo = mysqlrepo.NewContentSafetyRepository(bizDB)
+	} else {
+		repo = content_safety.NewMemoryRepo()
+	}
+	svc := content_safety.NewService(repo, noopAuthority{})
 
 	rdb, _ := infraredis.Open(cfg)
 	owner := "dispatcher-12377-" + uuid.NewString()

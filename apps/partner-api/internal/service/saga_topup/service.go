@@ -2,24 +2,27 @@
 //
 // 流程：
 //
-//	1. payment.intent     创建/复用 topup_intent（state=created）
-//	2. provider.topup     调持牌方分账（HMAC stub / Q12 后真实 SDK）→ provider_trade_no
-//	3. provider.callback  持牌方回调（异步；callback handler 写 saga step "callback"）
-//	4. fyapi.topup        Idempotency-Key=saga_id；customer fy_user_id 提额
-//	5. notify             写 notification_outbox（in-app + email）
+//  1. payment.intent     创建/复用 topup_intent（state=created）
+//  2. provider.topup     调持牌方分账（HMAC stub / Q12 后真实 SDK）→ provider_trade_no
+//  3. provider.callback  持牌方回调（异步；callback handler 写 saga step "callback"）
+//  4. fyapi.topup        Idempotency-Key=saga_id；customer fy_user_id 提额
+//  5. notify             写 notification_outbox（in-app + email）
 //
 // 关键 invariant：
-//   1. saga_id 是 UUIDv7（不是 topup_intent.id BIGINT）— v0.2.1 ARCH-HIGH-NEW-D
-//   2. topup_intent 字段不可在 funded 之后被改（lock by state machine）
-//   3. escalated 状态走 notification_outbox.event_code=topup.escalated（PRD §22.1 F-3）
+//  1. saga_id 是 UUIDv7（不是 topup_intent.id BIGINT）— v0.2.1 ARCH-HIGH-NEW-D
+//  2. topup_intent 字段不可在 funded 之后被改（lock by state machine）
+//  3. escalated 状态走 notification_outbox.event_code=topup.escalated（PRD §22.1 F-3）
 //
 // W1c 实现 callback handler；本文件提供 service skeleton + 状态机校验.
 package topup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -111,16 +114,27 @@ type Notifier interface {
 
 // Service 编排.
 type Service struct {
-	orch     saga.Orchestrator
-	intent   IntentPort
-	provider ProviderPort
-	fyapi    FyAPIPort
-	notify   Notifier
+	orch       saga.Orchestrator
+	intent     IntentPort
+	provider   ProviderPort
+	fyapi      FyAPIPort
+	notify     Notifier
+	idemDB     *gorm.DB
+	idemInsert saga.IdempotencyInserter
 }
 
 // NewService 构造.
 func NewService(o saga.Orchestrator, i IntentPort, p ProviderPort, f FyAPIPort, n Notifier) *Service {
-	return &Service{orch: o, intent: i, provider: p, fyapi: f, notify: n}
+	s := &Service{orch: o, intent: i, provider: p, fyapi: f, notify: n}
+	activeService.Store(s)
+	return s
+}
+
+// WithIdempotencyStore enables DB-backed idempotency for topup initiation.
+func (s *Service) WithIdempotencyStore(db *gorm.DB, inserter saga.IdempotencyInserter) *Service {
+	s.idemDB = db
+	s.idemInsert = inserter
+	return s
 }
 
 const (
@@ -128,12 +142,44 @@ const (
 	StepProvider = "topup.provider"
 	StepFundFy   = "topup.fy"
 	StepNotify   = "topup.notify"
+	StepCallback = "topup.callback"
+	StepMarkFund = "topup.intent.funded"
 )
+
+type stepInput struct {
+	Request         Request `json:"request,omitempty"`
+	SagaID          string  `json:"saga_id,omitempty"`
+	FyUserID        int64   `json:"fy_user_id,omitempty"`
+	Amount          int64   `json:"amount,omitempty"`
+	TraceID         string  `json:"trace_id,omitempty"`
+	ProviderTradeNo string  `json:"provider_trade_no,omitempty"`
+}
+
+var activeService atomic.Pointer[Service]
+
+func init() {
+	saga.RegisterStep(saga.KindCustomerTopup, StepIntent, runIntent)
+	saga.RegisterStep(saga.KindCustomerTopup, StepProvider, runProvider)
+	saga.RegisterStep(saga.KindCustomerTopup, StepCallback, runCallback)
+	saga.RegisterStep(saga.KindCustomerTopup, StepFundFy, runFundFy)
+	saga.RegisterStep(saga.KindCustomerTopup, StepMarkFund, runMarkFunded)
+	saga.RegisterStep(saga.KindCustomerTopup, StepNotify, runNotify)
+}
 
 // Initiate 创建 intent + 跳转持牌方.
 //
 // 返回 (payURL)；客户支付完成后由 webhook 回调驱动 OnCallback / OnPaid.
 func (s *Service) Initiate(ctx context.Context, req Request) (string, error) {
+	var payURL string
+	err := s.withInitiateIdempotency(ctx, req, func() error {
+		var err error
+		payURL, err = s.initiate(ctx, req)
+		return err
+	})
+	return payURL, err
+}
+
+func (s *Service) initiate(ctx context.Context, req Request) (string, error) {
 	if err := req.Validate(); err != nil {
 		return "", err
 	}
@@ -141,20 +187,32 @@ func (s *Service) Initiate(ctx context.Context, req Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := sg.Run(ctx, StepIntent, func(_ *gorm.DB) (any, error) {
-		return nil, s.intent.UpsertCreated(ctx, req)
-	}); err != nil {
+	input, err := encodeStepInput(stepInput{Request: req})
+	if err != nil {
+		return "", err
+	}
+	if _, err := sg.RunWithInput(ctx, StepIntent, input, runIntent); err != nil {
 		return "", err
 	}
 	var payURL string
-	if _, err := sg.Run(ctx, StepProvider, func(_ *gorm.DB) (any, error) {
-		url, _, e := s.provider.CreatePayment(ctx, req)
-		payURL = url
-		return nil, e
-	}); err != nil {
+	result, err := sg.RunWithInput(ctx, StepProvider, input, runProvider)
+	if err != nil {
 		return "", err
 	}
+	if url, ok := result.(string); ok {
+		payURL = url
+	}
 	return payURL, nil
+}
+
+func (s *Service) withInitiateIdempotency(ctx context.Context, req Request, fn func() error) error {
+	if s.idemDB == nil || s.idemInsert == nil || req.SagaID == "" {
+		return fn()
+	}
+	rec := saga.NewIdempotencyRecord("customer", req.CustomerID, req.SagaID, "POST /customer/topup", req.TraceID, `{"success":true}`, 200, time.Now().UTC())
+	return saga.WithIdempotency(ctx, s.idemDB, s.idemInsert, rec, func(_ *gorm.DB) error {
+		return fn()
+	})
 }
 
 // OnCallback 持牌方回调驱动；payload+signature 由 caller webhook handler 透传.
@@ -166,13 +224,15 @@ func (s *Service) OnCallback(ctx context.Context, payload []byte, signature stri
 	if !paid {
 		return ErrCallbackReplay
 	}
-	sg, err := s.orch.Resume(sagaID)
+	sg, err := s.orch.NewSaga(sagaID, saga.KindCustomerTopup)
 	if err != nil {
 		return err
 	}
-	if _, err := sg.Run(ctx, "topup.callback", func(_ *gorm.DB) (any, error) {
-		return nil, s.intent.MarkPaid(ctx, sagaID, "")
-	}); err != nil {
+	input, err := encodeStepInput(stepInput{SagaID: sagaID})
+	if err != nil {
+		return err
+	}
+	if _, err := sg.RunWithInput(ctx, StepCallback, input, runCallback); err != nil {
 		return err
 	}
 	// fund 走异步：service 调用方根据 callback 后立刻进 fund 步骤.
@@ -184,23 +244,21 @@ func (s *Service) Fund(ctx context.Context, sagaID string, fyUserID, amount int6
 	if !saga.IsValidUUIDv7(sagaID) {
 		return fmt.Errorf("topup: saga_id must be UUIDv7")
 	}
-	sg, err := s.orch.Resume(sagaID)
+	sg, err := s.orch.NewSaga(sagaID, saga.KindCustomerTopup)
 	if err != nil {
 		return err
 	}
-	if _, err := sg.Run(ctx, StepFundFy, func(_ *gorm.DB) (any, error) {
-		return nil, s.fyapi.TopupCustomer(ctx, fyUserID, amount, sagaID, traceID)
-	}); err != nil {
+	input, err := encodeStepInput(stepInput{SagaID: sagaID, FyUserID: fyUserID, Amount: amount, TraceID: traceID})
+	if err != nil {
 		return err
 	}
-	if _, err := sg.Run(ctx, "topup.intent.funded", func(_ *gorm.DB) (any, error) {
-		return nil, s.intent.MarkFunded(ctx, sagaID)
-	}); err != nil {
+	if _, err := sg.RunWithInput(ctx, StepFundFy, input, runFundFy); err != nil {
 		return err
 	}
-	if _, err := sg.Run(ctx, StepNotify, func(_ *gorm.DB) (any, error) {
-		return nil, s.notify.Notify(ctx, "topup.success", sagaID, "", "")
-	}); err != nil {
+	if _, err := sg.RunWithInput(ctx, StepMarkFund, input, runMarkFunded); err != nil {
+		return err
+	}
+	if _, err := sg.RunWithInput(ctx, StepNotify, input, runNotify); err != nil {
 		return err
 	}
 	return nil
@@ -209,4 +267,82 @@ func (s *Service) Fund(ctx context.Context, sagaID string, fyUserID, amount int6
 // NotifyEscalated escalated 状态 UX 通知（场景 D 兜底）.
 func (s *Service) NotifyEscalated(ctx context.Context, sagaID, recipient string) error {
 	return s.notify.Notify(ctx, "topup.escalated", sagaID, recipient, "")
+}
+
+func runIntent(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.intent.UpsertCreated(ctx, in.Request)
+}
+
+func runProvider(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	payURL, _, err := s.provider.CreatePayment(ctx, in.Request)
+	return payURL, err
+}
+
+func runCallback(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.intent.MarkPaid(ctx, in.SagaID, in.ProviderTradeNo)
+}
+
+func runFundFy(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.fyapi.TopupCustomer(ctx, in.FyUserID, in.Amount, in.SagaID, in.TraceID)
+}
+
+func runMarkFunded(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.intent.MarkFunded(ctx, in.SagaID)
+}
+
+func runNotify(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.notify.Notify(ctx, "topup.success", in.SagaID, "", "")
+}
+
+func encodeStepInput(in stepInput) ([]byte, error) {
+	b, err := json.Marshal(in)
+	if err != nil {
+		return nil, fmt.Errorf("topup: encode step input: %w", err)
+	}
+	return b, nil
+}
+
+func decodeRegisteredStep(input []byte) (*Service, stepInput, error) {
+	s := activeService.Load()
+	if s == nil {
+		return nil, stepInput{}, fmt.Errorf("topup: registered step executor unavailable")
+	}
+	var in stepInput
+	if err := json.Unmarshal(input, &in); err != nil {
+		return nil, stepInput{}, fmt.Errorf("topup: decode step input: %w", err)
+	}
+	if in.Request.SagaID != "" {
+		in.SagaID = in.Request.SagaID
+		if err := in.Request.Validate(); err != nil {
+			return nil, stepInput{}, err
+		}
+	}
+	if !saga.IsValidUUIDv7(in.SagaID) {
+		return nil, stepInput{}, fmt.Errorf("topup: saga_id must be UUIDv7")
+	}
+	return s, in, nil
 }

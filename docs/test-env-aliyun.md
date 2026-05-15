@@ -16,7 +16,7 @@
 | MNS | 按量队列 | 3 个队列 | `in` / `out` / `dlq` |
 | SLS | 可选，7 天保留 | 7-15 天保留 | 联调 trace_id 和排查 outbox/MNS 时建议开启 |
 | KMS | 最小配置 | 最小配置 | 测试环境也跑真实密钥链路，避免 staging 前才暴露问题 |
-| ACR | 私有仓库 | 私有仓库 | 后端和前端镜像都必须打明确版本 tag |
+| ACR | 与 Fy-api 共用同一个 ACR 实例 | 私有仓库 | 后端和前端镜像都必须打明确版本 tag |
 
 省钱原则：
 
@@ -161,8 +161,8 @@ ALLOWED_ORIGINS=https://test-store.example.com,https://test-customer.example.com
 
 ```bash
 VERSION=1.2.1-tracenex
-podman build -t registry-vpc.cn-hangzhou.aliyuncs.com/tracenexbiz/partner-api:${VERSION} apps/partner-api
-podman push registry-vpc.cn-hangzhou.aliyuncs.com/tracenexbiz/partner-api:${VERSION}
+podman build -t transnext-acr-ee-registry-vpc.cn-hangzhou.cr.aliyuncs.com/tracenexbiz/partner-api:${VERSION} apps/partner-api
+podman push transnext-acr-ee-registry-vpc.cn-hangzhou.cr.aliyuncs.com/tracenexbiz/partner-api:${VERSION}
 ```
 
 ## 七、验收清单

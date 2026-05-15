@@ -62,6 +62,7 @@ type MNSConsumer struct {
 	client       MNSClient
 	queueName    string
 	dlqName      string
+	dataRegion   string
 	waitSec      int
 	dlqThreshold int
 
@@ -76,6 +77,7 @@ type MNSConsumer struct {
 type MNSConsumerOptions struct {
 	QueueName     string // sink queue
 	DLQName       string // dead-letter queue
+	DataRegion    string // cn / sg; non-empty requires matching msg attr data_region
 	WaitSeconds   int    // long-poll 等待秒；默认 20（MNS 最大 30）
 	DLQThreshold  int    // dequeue_count >= 此值 → MoveToDLQ；默认 10
 	NoopOnUnknown bool   // 未注册 event_type 时 log+ack（默认 true）
@@ -99,10 +101,11 @@ func NewMNSConsumer(client MNSClient, opts MNSConsumerOptions) (*MNSConsumer, er
 		client:        client,
 		queueName:     opts.QueueName,
 		dlqName:       opts.DLQName,
+		dataRegion:    opts.DataRegion,
 		waitSec:       opts.WaitSeconds,
 		dlqThreshold:  opts.DLQThreshold,
 		handlers:      map[string]Handler{},
-		noopOnUnknown: opts.NoopOnUnknown || true,
+		noopOnUnknown: opts.NoopOnUnknown,
 	}, nil
 }
 
@@ -161,6 +164,16 @@ func (c *MNSConsumer) handleOne(ctx context.Context, msg *MNSMessage) error {
 	}
 
 	eventType := msg.Attrs["event_type"]
+	if c.dataRegion != "" && msg.Attrs["data_region"] != c.dataRegion {
+		log.Error().
+			Str("queue", c.queueName).
+			Str("event_type", eventType).
+			Str("msg_id", msg.MessageID).
+			Str("message_region", msg.Attrs["data_region"]).
+			Str("expected_region", c.dataRegion).
+			Msg("mns_data_region_mismatch_leave_for_dlq")
+		return nil
+	}
 	c.mu.RLock()
 	h, ok := c.handlers[eventType]
 	c.mu.RUnlock()

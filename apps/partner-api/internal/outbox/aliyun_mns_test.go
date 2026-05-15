@@ -201,6 +201,20 @@ func TestMNSConsumer_UnknownEventTypeNoopAck(t *testing.T) {
 	}
 }
 
+func TestMNSConsumer_DataRegionMismatchLeavesMessage(t *testing.T) {
+	t.Parallel()
+	fc := &fakeMNSClient{}
+	c, _ := NewMNSConsumer(fc, MNSConsumerOptions{QueueName: "q-in", DLQName: "q-dlq", WaitSeconds: 1, DataRegion: "cn"})
+	c.Register("evt", func(_ context.Context, _ *MNSMessage) error { return nil })
+	msg := makeMsg("m1", map[string]string{"event_type": "evt", "data_region": "sg"}, "x", 1)
+	if err := c.handleOne(context.Background(), msg); err != nil {
+		t.Fatalf("handleOne: %v", err)
+	}
+	if len(fc.deleted) != 0 {
+		t.Fatalf("region mismatch must not ack; deleted=%v", fc.deleted)
+	}
+}
+
 // pop adapts fc.queue head into a one-shot channel for cleaner test syntax.
 func pop(fc *fakeMNSClient) <-chan *MNSMessage {
 	ch := make(chan *MNSMessage, 1)

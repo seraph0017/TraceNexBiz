@@ -1,5 +1,5 @@
 # partner-api Dockerfile (W0 scaffold; 多阶段构建).
-FROM golang:1.22-alpine AS builder
+FROM docker.io/library/golang:1.22-alpine AS builder
 WORKDIR /src
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
 COPY go.mod ./

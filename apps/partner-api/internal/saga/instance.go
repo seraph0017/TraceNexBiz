@@ -277,6 +277,10 @@ func (i *instance) Compensate(ctx context.Context, step string, fn CompensateFn)
 	if txErr != nil {
 		failed := i.snapshotFailed(existing, "compensate: "+txErr.Error(), now)
 		_ = i.repo.Save(ctx, &failed)
+		if escalate, reason := ShouldEscalate(&failed, now); escalate {
+			_ = i.repo.MarkEscalated(ctx, i.id, step, reason)
+			return nil, fmt.Errorf("saga: compensate %s escalated (%s): %w", step, reason, ErrSagaEscalated)
+		}
 		return nil, fmt.Errorf("saga: compensate %s failed: %w", step, txErr)
 	}
 	compensated := i.snapshotCompensated(existing, now)

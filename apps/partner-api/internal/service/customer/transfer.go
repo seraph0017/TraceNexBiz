@@ -8,17 +8,23 @@ import (
 	"errors"
 	"fmt"
 
+	"gorm.io/gorm"
+
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/domain"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/repository"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/saga"
 )
 
 // TransferRequestInput 客户发起转挂请求（场景 H）。
 type TransferRequestInput struct {
-	CustomerID    int64
-	FromPartnerID int64
-	ToPartnerID   int64
-	InitiatorType string // customer / staff
-	InitiatorID   int64
-	Reason        string
+	CustomerID     int64
+	FromPartnerID  int64
+	ToPartnerID    int64
+	InitiatorType  string // customer / staff
+	InitiatorID    int64
+	Reason         string
+	IdempotencyKey string
+	TraceID        string
 }
 
 // RequestTransfer 客户发起转挂（场景 H 起点）。状态机：pending_a → pending_b → pending_staff → completed。
@@ -26,6 +32,18 @@ type TransferRequestInput struct {
 // 本方法仅写 customer_partner_change_log；customer.partner_id 不变。
 // 后续 partner A accept / partner B adopt / staff approve 由 W1c admin / W1g UI 调本服务的 推进方法。
 func (s *Service) RequestTransfer(ctx context.Context, in TransferRequestInput) (*domain.CustomerPartnerChangeLog, error) {
+	var out *domain.CustomerPartnerChangeLog
+	if err := s.withMutationIdempotency(ctx, "customer", in.InitiatorID, in.IdempotencyKey, "POST /customer/transfer", in.TraceID, func() error {
+		var err error
+		out, err = s.requestTransfer(ctx, in)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Service) requestTransfer(ctx context.Context, in TransferRequestInput) (*domain.CustomerPartnerChangeLog, error) {
 	c, err := s.repo.FindByIDForPartner(ctx, in.FromPartnerID, in.CustomerID)
 	if err != nil {
 		return nil, fmt.Errorf("customer: scoped find for transfer: %w", err)
@@ -105,16 +123,24 @@ func (s *Service) AdvanceTransferStage(ctx context.Context, logID int64, toStage
 
 // EraseInput PIPL §47 右遗忘（场景 Q）。
 type EraseInput struct {
-	CustomerID int64
-	PartnerID  int64
-	Reason     string
-	OperatorID int64
+	CustomerID     int64
+	PartnerID      int64
+	Reason         string
+	OperatorID     int64
+	IdempotencyKey string
+	TraceID        string
 }
 
 // SubmitErase 删除客户：customer.deleted_at + status='deleted' + Fy-api `/user/erase`。
 //
 // 不删 audit_log（哈希链）；不删 revenue_log（仅替换 fy_user_id 为 -1，由 W1c PIPL 服务实现）。
 func (s *Service) SubmitErase(ctx context.Context, in EraseInput) error {
+	return s.withMutationIdempotency(ctx, "customer", in.CustomerID, in.IdempotencyKey, "POST /customer/erase", in.TraceID, func() error {
+		return s.submitErase(ctx, in)
+	})
+}
+
+func (s *Service) submitErase(ctx context.Context, in EraseInput) error {
 	c, err := s.repo.FindByIDForPartner(ctx, in.PartnerID, in.CustomerID)
 	if err != nil {
 		return fmt.Errorf("customer: scoped find for erase: %w", err)
@@ -137,4 +163,25 @@ func (s *Service) SubmitErase(ctx context.Context, in EraseInput) error {
 		return fmt.Errorf("customer: fyapi erase: %w", err)
 	}
 	return nil
+}
+
+func (s *Service) withMutationIdempotency(ctx context.Context, actorType string, actorID int64, key, endpoint, traceID string, fn func() error) error {
+	if key == "" || s.idemDB == nil || s.idemInsert == nil {
+		if fn == nil {
+			return nil
+		}
+		return fn()
+	}
+	now := s.clock()
+	rec := saga.NewIdempotencyRecord(actorType, actorID, key, endpoint, traceID, `{"success":true}`, 200, now)
+	err := saga.WithIdempotency(ctx, s.idemDB, s.idemInsert, rec, func(_ *gorm.DB) error {
+		if fn == nil {
+			return nil
+		}
+		return fn()
+	})
+	if errors.Is(err, repository.ErrDuplicateKey) {
+		return saga.ErrDuplicateIdempotency
+	}
+	return err
 }

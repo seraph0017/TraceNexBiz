@@ -24,7 +24,7 @@ Common usage from the TraceNexBiz repo root:
     fab logs --target=ceshi --tail=200
 
 Known targets:
-    ceshi: ssh -i ~/.ssh/ceshi_cd.pem root@6.15.48.148
+    ceshi: ssh -i ~/.ssh/ceshi_cd.pem -p 58422 root@8.156.88.148
 
 Override with environment variables when needed:
     TNBIZ_TARGET
@@ -38,20 +38,23 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
 
 from fabric import Connection, task
 
 TARGETS = {
     "ceshi": {
-        "host": "6.15.48.148",
-        "port": 22,
+        "host": "8.156.88.148",
+        "port": 58422,
         "user": "root",
         "key": "~/.ssh/ceshi_cd.pem",
         "app_dir": "/opt/tracenexbiz",
         "src_dir": "/root/TraceNexBiz",
         "build_dir": "/tmp/tracenexbiz-build",
-        "registry": "registry-vpc.cn-chengdu.aliyuncs.com",
+        "registry": "transnext-acr-ee-registry-vpc.cn-hangzhou.cr.aliyuncs.com",
         "namespace": "tracenexbiz",
         "repo": "partner-api",
         "repo_url": "git@github.com:seraph0017/TraceNexBiz.git",
@@ -184,6 +187,28 @@ def _checkout_ref(c: Connection, cfg: dict[str, object], ref: str):
     )
 
 
+def _create_local_worktree_archive() -> Path:
+    repo_root = Path(__file__).resolve().parent
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    paths = [p for p in result.stdout.decode("utf-8").split("\0") if p]
+    if not paths:
+        raise RuntimeError("no files found to archive")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="tracenexbiz-worktree-"))
+    archive = tmp_dir / "worktree.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for rel in paths:
+            path = repo_root / rel
+            if path.is_file():
+                tar.add(path, arcname=rel)
+    return archive
+
+
 @task(help={"target": "target name: ceshi"})
 def info(ctx, target="ceshi"):
     """Print local Fabric deployment configuration."""
@@ -299,6 +324,48 @@ def build(ctx, target="ceshi", tag="", ref="", pull=True, no_cache=False):
     )
 
 
+@task(
+    help={
+        "target": "target name: ceshi",
+        "tag": "image tag to build, e.g. 1.2.1-tracenex",
+        "pull": "pass --pull to podman build",
+        "no_cache": "pass --no-cache to podman build",
+    }
+)
+def build_local(ctx, target="ceshi", tag="", pull=True, no_cache=False):
+    """Build the partner-api image on the server from the local worktree, including uncommitted files."""
+    tag = _validate_arg("tag", tag)
+    cfg = _config(target)
+    c = _connect(cfg)
+
+    flags = []
+    if pull:
+        flags.append("--pull")
+    if no_cache:
+        flags.append("--no-cache")
+
+    archive = _create_local_worktree_archive()
+    remote_archive = f"/tmp/tracenexbiz-worktree-{tag}.tar.gz"
+    c.put(str(archive), remote_archive)
+
+    image = _q(_image(cfg, tag))
+    flag_str = " ".join(flags)
+    build_dir = _q(str(cfg["build_dir"]))
+    _run(
+        c,
+        " && ".join(
+            [
+                f"rm -rf {build_dir}",
+                f"mkdir -p {build_dir}",
+                f"tar -xzf {_q(remote_archive)} -C {build_dir}",
+                f"cd {build_dir}",
+                f"podman build {flag_str} -t {image} -f apps/partner-api/Dockerfile apps/partner-api",
+                f"rm -rf {build_dir} {_q(remote_archive)}",
+            ]
+        ),
+    )
+
+
 @task(help={"target": "target name: ceshi", "tag": "image tag to push to ACR"})
 def push_image(ctx, target="ceshi", tag=""):
     """Push a previously built image from the server to ACR."""
@@ -394,6 +461,25 @@ def release(ctx, target="ceshi", tag="", ref="", skip_build=False, skip_push=Fal
     ref = ref or tag
     if not skip_build:
         build(ctx, target=target, tag=tag, ref=ref)
+    if not skip_push:
+        push_image(ctx, target=target, tag=tag)
+    deploy(ctx, target=target, tag=tag)
+    health(ctx, target=target)
+
+
+@task(
+    help={
+        "target": "target name: ceshi",
+        "tag": "image tag to build/push/deploy, e.g. 1.2.1-tracenex",
+        "skip_build": "skip build step",
+        "skip_push": "skip ACR push step",
+    }
+)
+def release_local(ctx, target="ceshi", tag="", skip_build=False, skip_push=False):
+    """Full release from local worktree: build, push to ACR, blue-green deploy, health check."""
+    tag = _validate_arg("tag", tag)
+    if not skip_build:
+        build_local(ctx, target=target, tag=tag)
     if not skip_push:
         push_image(ctx, target=target, tag=tag)
     deploy(ctx, target=target, tag=tag)

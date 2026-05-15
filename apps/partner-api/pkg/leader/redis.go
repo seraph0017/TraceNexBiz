@@ -119,6 +119,7 @@ func (l *RedisLock) Run(ctx context.Context, body func(ctx context.Context) erro
 		for {
 			select {
 			case <-leaderCtx.Done():
+				cancel()
 				break renewLoop
 			case bErr := <-done:
 				cancel()

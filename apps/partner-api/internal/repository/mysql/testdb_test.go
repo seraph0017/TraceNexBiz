@@ -29,6 +29,8 @@ func allRowTypes() []any {
 		&walletHoldRow{},
 		&partnerWalletLogRow{},
 		&idempotencyRecordRow{},
+		&contentSafetyEventRow{},
+		&contentSafetyReportRow{},
 	}
 }
 

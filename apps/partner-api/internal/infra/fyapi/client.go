@@ -303,10 +303,9 @@ func (c *Client) RefundCustomer(ctx context.Context, fyUserID, amount int64, ide
 		return errors.New("fyapi: idempotency key required")
 	}
 	body := map[string]interface{}{
-		"user_id":  fyUserID,
-		"quota":    amount,
-		"saga_id":  idemKey,
-		"order_ref": traceID,
+		"user_id": fyUserID,
+		"quota":   amount,
+		"saga_id": idemKey,
 	}
 	var out TopupResponse
 	return c.doAndDecode(ctx, Request{
@@ -357,12 +356,15 @@ type QuotaResponse struct {
 	AffQuota  int64 `json:"aff_quota"`
 }
 
+// QuotaInfo is the full quota snapshot returned by Fy-api.
+type QuotaInfo = QuotaResponse
+
 // GetUserQuota GET /api/internal/user/quota?user_id=...
 //
-// 返回客户当前 quota；GET 不需 idempotency key。
-func (c *Client) GetUserQuota(ctx context.Context, fyUserID int64) (int64, error) {
+// 返回客户完整 quota snapshot；GET 不需 idempotency key。
+func (c *Client) GetUserQuota(ctx context.Context, fyUserID int64) (*QuotaInfo, error) {
 	if fyUserID <= 0 {
-		return 0, errors.New("fyapi: fy_user_id required")
+		return nil, errors.New("fyapi: fy_user_id required")
 	}
 	q := url.Values{}
 	q.Set("user_id", strconv.FormatInt(fyUserID, 10))
@@ -372,9 +374,18 @@ func (c *Client) GetUserQuota(ctx context.Context, fyUserID int64) (int64, error
 		Path:   "/api/internal/user/quota",
 		Query:  q,
 	}, &out); err != nil {
+		return nil, err
+	}
+	return (*QuotaInfo)(&out), nil
+}
+
+// GetUserQuotaBalance returns only the quota balance for legacy callers.
+func (c *Client) GetUserQuotaBalance(ctx context.Context, fyUserID int64) (int64, error) {
+	info, err := c.GetUserQuota(ctx, fyUserID)
+	if err != nil {
 		return 0, err
 	}
-	return out.Quota, nil
+	return info.Quota, nil
 }
 
 // CreateTokenRequest 透传到 Fy-api/controller/tnbiz_internal/token.go::CreateTokenRequest。

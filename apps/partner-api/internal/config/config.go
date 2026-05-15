@@ -81,6 +81,8 @@ type RedisConfig struct {
 // JWTConfig JWT 校验配置（per ADR-007 v0.2：公钥从 KMS Secret Manager 注入）。
 type JWTConfig struct {
 	VerifyKeyPEM string
+	SignKeyPEM   string
+	KeyID        string
 	Issuer       string
 	Audience     string
 }
@@ -125,6 +127,7 @@ type MNSConfig struct {
 	QueueIn              string // SINK 长轮询队列
 	QueueOut             string // SOURCE 发布队列
 	QueueDLQ             string // DLQ 队列名
+	DataRegion           string // cn / sg, stamped on each MNS message
 	VisibilityTimeoutSec int    // ChangeVisibility 默认；MNS console 也可配
 	LongPollSec          int    // ReceiveMessage waitseconds；MNS 最大 30
 	DLQThreshold         int    // dequeue_count 达此值 → MoveToDLQ
@@ -177,7 +180,9 @@ func Load() (*Config, error) {
 			DB:       int(getenvInt64("REDIS_DB", 0)),
 		},
 		JWT: JWTConfig{
-			VerifyKeyPEM: getenv("JWT_VERIFY_KEY_PEM", ""),
+			VerifyKeyPEM: getenvFileOrValue("JWT_VERIFY_KEY_FILE", "JWT_VERIFY_KEY_PEM", ""),
+			SignKeyPEM:   getenvFileOrValue("JWT_SIGN_KEY_FILE", "JWT_SIGN_KEY_PEM", ""),
+			KeyID:        getenv("JWT_KEY_ID", ""),
 			Issuer:       getenv("JWT_ISSUER", "tracenex-biz"),
 			Audience:     getenv("JWT_AUDIENCE", "tracenex-biz"),
 		},
@@ -209,6 +214,7 @@ func Load() (*Config, error) {
 			QueueIn:              getenv("MNS_QUEUE_IN", "tnbiz-partner-in"),
 			QueueOut:             getenv("MNS_QUEUE_OUT", "tnbiz-partner-out"),
 			QueueDLQ:             getenv("MNS_QUEUE_DLQ", "tnbiz-partner-dlq"),
+			DataRegion:           getenv("DATA_REGION", "cn"),
 			VisibilityTimeoutSec: int(getenvInt64("MNS_VISIBILITY_TIMEOUT_SEC", 30)),
 			LongPollSec:          int(getenvInt64("MNS_LONG_POLL_SEC", 20)),
 			DLQThreshold:         int(getenvInt64("MNS_DLQ_THRESHOLD", 10)),
@@ -267,6 +273,12 @@ func (c *Config) validate() error {
 	if c.MNS.Backend == "aliyun_mns" && (c.MNS.Endpoint == "" || c.MNS.AccessKeyID == "" || c.MNS.AccessKeySecret == "") {
 		return fmt.Errorf("OUTBOX_BACKEND=aliyun_mns requires MNS_ENDPOINT / MNS_ACCESS_KEY_ID / MNS_ACCESS_KEY_SECRET")
 	}
+	if c.MNS.DataRegion == "" {
+		c.MNS.DataRegion = "cn"
+	}
+	if c.MNS.DataRegion != "cn" && c.MNS.DataRegion != "sg" {
+		return fmt.Errorf("DATA_REGION must be cn|sg, got %q", c.MNS.DataRegion)
+	}
 	return nil
 }
 
@@ -303,6 +315,16 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func getenvFileOrValue(fileKey, valueKey, def string) string {
+	if path := os.Getenv(fileKey); path != "" {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			return string(b)
+		}
+	}
+	return getenv(valueKey, def)
 }
 
 func getenvInt64(key string, def int64) int64 {

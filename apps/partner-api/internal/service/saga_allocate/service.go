@@ -16,8 +16,11 @@ package allocate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -77,15 +80,26 @@ type CustomerLookup interface {
 
 // Service 编排 5 步 saga.
 type Service struct {
-	orch   saga.Orchestrator
-	wallet WalletPort
-	fyapi  FyAPIPort
-	lookup CustomerLookup
+	orch       saga.Orchestrator
+	wallet     WalletPort
+	fyapi      FyAPIPort
+	lookup     CustomerLookup
+	idemDB     *gorm.DB
+	idemInsert saga.IdempotencyInserter
 }
 
 // NewService 构造.
 func NewService(o saga.Orchestrator, w WalletPort, f FyAPIPort, l CustomerLookup) *Service {
-	return &Service{orch: o, wallet: w, fyapi: f, lookup: l}
+	s := &Service{orch: o, wallet: w, fyapi: f, lookup: l}
+	activeService.Store(s)
+	return s
+}
+
+// WithIdempotencyStore enables DB-backed idempotency for Allocate.
+func (s *Service) WithIdempotencyStore(db *gorm.DB, inserter saga.IdempotencyInserter) *Service {
+	s.idemDB = db
+	s.idemInsert = inserter
+	return s
 }
 
 // 步骤名常量（PII scrubber audit 用 string match，需稳定）.
@@ -97,6 +111,21 @@ const (
 	StepLog     = "wallet.log"
 )
 
+type stepInput struct {
+	Request  Request `json:"request"`
+	FyUserID int64   `json:"fy_user_id,omitempty"`
+}
+
+var activeService atomic.Pointer[Service]
+
+func init() {
+	saga.RegisterStep(saga.KindWalletAllocate, StepDeduct, runDeduct)
+	saga.RegisterStep(saga.KindWalletAllocate, StepHold, runHold)
+	saga.RegisterStep(saga.KindWalletAllocate, StepFyTopup, runFyTopup)
+	saga.RegisterStep(saga.KindWalletAllocate, StepCommit, runCommit)
+	saga.RegisterStep(saga.KindWalletAllocate, StepLog, runLog)
+}
+
 // Run 推进 saga；committed step 自动跳过.
 //
 // 失败处理：
@@ -104,6 +133,12 @@ const (
 //   - StepFyTopup 失败：补偿 ReleaseHold + Refund
 //   - StepCommit 失败：补偿 ReleaseHold + Refund + Fy-api refund
 func (s *Service) Run(ctx context.Context, req Request) error {
+	return s.withIdempotency(ctx, req, func() error {
+		return s.run(ctx, req)
+	})
+}
+
+func (s *Service) run(ctx context.Context, req Request) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
@@ -116,24 +151,22 @@ func (s *Service) Run(ctx context.Context, req Request) error {
 	if err != nil {
 		return fmt.Errorf("allocate: lookup customer: %w", err)
 	}
-
-	if _, err := sg.Run(ctx, StepDeduct, func(_ *gorm.DB) (any, error) {
-		return nil, s.wallet.Deduct(ctx, req.PartnerID, req.Amount, req.SagaID)
-	}); err != nil {
+	input, err := encodeStepInput(stepInput{Request: req, FyUserID: fyUserID})
+	if err != nil {
 		return err
 	}
-	if _, err := sg.Run(ctx, StepHold, func(_ *gorm.DB) (any, error) {
-		return nil, s.wallet.Hold(ctx, req.PartnerID, req.Amount, req.SagaID)
-	}); err != nil {
+
+	if _, err := sg.RunWithInput(ctx, StepDeduct, input, runDeduct); err != nil {
+		return err
+	}
+	if _, err := sg.RunWithInput(ctx, StepHold, input, runHold); err != nil {
 		// hold 失败 → 把 deduct 退回
 		_, compErr := sg.Compensate(ctx, StepDeduct, func(_ *gorm.DB) (any, error) {
 			return nil, s.wallet.Refund(ctx, req.PartnerID, req.Amount, req.SagaID)
 		})
 		return wrapCompensationError("hold", err, compErr)
 	}
-	if _, err := sg.Run(ctx, StepFyTopup, func(_ *gorm.DB) (any, error) {
-		return nil, s.fyapi.TopupCustomer(ctx, fyUserID, req.Amount, req.SagaID, req.TraceID)
-	}); err != nil {
+	if _, err := sg.RunWithInput(ctx, StepFyTopup, input, runFyTopup); err != nil {
 		// fyapi 失败 → 补偿：释放 hold + 退回 deduct
 		_, releaseErr := sg.Compensate(ctx, StepHold, func(_ *gorm.DB) (any, error) {
 			return nil, s.wallet.ReleaseHold(ctx, req.SagaID)
@@ -143,9 +176,7 @@ func (s *Service) Run(ctx context.Context, req Request) error {
 		})
 		return wrapCompensationError("fyapi topup", err, errors.Join(releaseErr, refundErr))
 	}
-	if _, err := sg.Run(ctx, StepCommit, func(_ *gorm.DB) (any, error) {
-		return nil, s.wallet.CommitHold(ctx, req.SagaID)
-	}); err != nil {
+	if _, err := sg.RunWithInput(ctx, StepCommit, input, runCommit); err != nil {
 		_, fyErr := sg.Compensate(ctx, StepFyTopup, func(_ *gorm.DB) (any, error) {
 			return nil, s.fyapi.RefundCustomer(ctx, fyUserID, req.Amount, req.SagaID, req.TraceID)
 		})
@@ -157,12 +188,83 @@ func (s *Service) Run(ctx context.Context, req Request) error {
 		})
 		return wrapCompensationError("commit hold", err, errors.Join(fyErr, releaseErr, refundErr))
 	}
-	if _, err := sg.Run(ctx, StepLog, func(_ *gorm.DB) (any, error) {
-		return nil, s.wallet.WriteLog(ctx, req)
-	}); err != nil {
+	if _, err := sg.RunWithInput(ctx, StepLog, input, runLog); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (s *Service) withIdempotency(ctx context.Context, req Request, fn func() error) error {
+	if s.idemDB == nil || s.idemInsert == nil || req.SagaID == "" {
+		return fn()
+	}
+	rec := saga.NewIdempotencyRecord("partner", req.PartnerID, req.SagaID, "POST /partner/wallet/allocate", req.TraceID, `{"success":true}`, 200, time.Now().UTC())
+	return saga.WithIdempotency(ctx, s.idemDB, s.idemInsert, rec, func(_ *gorm.DB) error {
+		return fn()
+	})
+}
+
+func runDeduct(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.wallet.Deduct(ctx, in.Request.PartnerID, in.Request.Amount, in.Request.SagaID)
+}
+
+func runHold(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.wallet.Hold(ctx, in.Request.PartnerID, in.Request.Amount, in.Request.SagaID)
+}
+
+func runFyTopup(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.fyapi.TopupCustomer(ctx, in.FyUserID, in.Request.Amount, in.Request.SagaID, in.Request.TraceID)
+}
+
+func runCommit(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.wallet.CommitHold(ctx, in.Request.SagaID)
+}
+
+func runLog(ctx context.Context, _ *gorm.DB, input []byte) (any, error) {
+	s, in, err := decodeRegisteredStep(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, s.wallet.WriteLog(ctx, in.Request)
+}
+
+func encodeStepInput(in stepInput) ([]byte, error) {
+	b, err := json.Marshal(in)
+	if err != nil {
+		return nil, fmt.Errorf("allocate: encode step input: %w", err)
+	}
+	return b, nil
+}
+
+func decodeRegisteredStep(input []byte) (*Service, stepInput, error) {
+	s := activeService.Load()
+	if s == nil {
+		return nil, stepInput{}, fmt.Errorf("allocate: registered step executor unavailable")
+	}
+	var in stepInput
+	if err := json.Unmarshal(input, &in); err != nil {
+		return nil, stepInput{}, fmt.Errorf("allocate: decode step input: %w", err)
+	}
+	if err := in.Request.Validate(); err != nil {
+		return nil, stepInput{}, err
+	}
+	return s, in, nil
 }
 
 func wrapCompensationError(stage string, cause, compErr error) error {

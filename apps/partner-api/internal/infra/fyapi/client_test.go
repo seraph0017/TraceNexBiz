@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -110,9 +111,9 @@ func TestTopupCustomer_5xx_Retryable(t *testing.T) {
 func TestTopupCustomer_Validation(t *testing.T) {
 	c := newTestClient(httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})))
 	cases := []struct {
-		name                string
-		uid, amt            int64
-		idem                string
+		name     string
+		uid, amt int64
+		idem     string
 	}{
 		{"bad uid", 0, 1000, "k"},
 		{"bad amount", 1, 0, "k"},
@@ -133,8 +134,12 @@ func TestTopupCustomer_Validation(t *testing.T) {
 
 func TestRefundCustomer_Success(t *testing.T) {
 	var gotPath string
+	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(envelopeOK(`{"user_id":42,"new_quota":1100,"used_quota":50}`)))
 	}))
@@ -145,6 +150,12 @@ func TestRefundCustomer_Success(t *testing.T) {
 	}
 	if gotPath != "/api/internal/user/refund" {
 		t.Fatalf("wrong path: %s", gotPath)
+	}
+	if gotBody["saga_id"] != "idem-r" {
+		t.Fatalf("saga_id=%v", gotBody["saga_id"])
+	}
+	if _, ok := gotBody["order_ref"]; ok {
+		t.Fatalf("order_ref must not be populated from trace id: %v", gotBody)
 	}
 }
 
@@ -161,8 +172,8 @@ func TestGetUserQuota_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if q != 777 {
-		t.Fatalf("quota=%d want 777", q)
+	if q.Quota != 777 || q.UsedQuota != 3 || q.AffQuota != 0 {
+		t.Fatalf("quota info=%+v", q)
 	}
 	if !strings.Contains(gotQuery, "user_id=42") {
 		t.Fatalf("query wrong: %s", gotQuery)

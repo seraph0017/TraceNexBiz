@@ -18,6 +18,9 @@
 //	POST   /customer/kyc                    customer 提交 KYC（路径同 service）
 //	POST   /customer/transfer               场景 H 切换渠道商
 //	POST   /customer/erase                  场景 Q 右遗忘
+//	GET    /admin/partners                  staff 列表
+//	POST   /admin/partners                  staff 新建渠道商
+//	GET    /admin/partners/:id              staff 详情
 //	POST   /admin/partners/:id/approve      staff 审核通过
 //
 // W1c 在 admin / staff 路由组上额外挂 RBAC + step-up middleware。
@@ -53,7 +56,7 @@ type W1aDeps struct {
 //   - "partner_self"    actor=partner 自身
 //   - "customer_self"   actor=customer 自身
 //   - "staff_admin"     actor=staff（具体 RBAC 角色由 service 层校）
-func RegisterW1aRoutes(r *gin.Engine, d W1aDeps) {
+func RegisterW1aRoutes(r gin.IRouter, d W1aDeps) {
 	pub := r.Group("/public")
 	pub.POST("/auth/login", middleware.WithScope("public"), loginHandler(d.Auth))
 	pub.POST("/auth/logout", middleware.WithScope("public"), logoutHandler(d.Auth))
@@ -77,9 +80,44 @@ func RegisterW1aRoutes(r *gin.Engine, d W1aDeps) {
 	c.POST("/erase", middleware.WithScope("customer_self"), customerEraseHandler(d.Customer))
 
 	a := r.Group("/admin")
+	a.GET("/me", middleware.WithScope("staff_admin"), staffMeHandler())
+	a.GET("/partners", middleware.WithScope("staff_admin"), partnerListHandler(d.Partner))
+	a.POST("/partners", middleware.WithScope("staff_admin"), partnerCreateHandler(d.Partner))
+	a.GET("/partners/:id", middleware.WithScope("staff_admin"), partnerDetailHandler(d.Partner))
 	a.POST("/partners/:id/approve", middleware.WithScope("staff_admin"), partnerApproveHandler(d.Partner))
 	a.POST("/partners/:id/terminate", middleware.WithScope("staff_admin"), partnerTerminateHandler(d.Partner))
 	a.POST("/kyc/:id/review", middleware.WithScope("staff_compliance"), kycReviewHandler(d.KYC))
+}
+
+func staffMeHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		_, staffID := scopeOf(c)
+		if staffID <= 0 {
+			fail(c, 401, "BIZ_AUTH_REQUIRED", "未登录", "auth required")
+			return
+		}
+		ok(c, 200, gin.H{
+			"id":           staffID,
+			"username":     "root",
+			"email_masked": "te***@tracenex.local",
+			"role":         "super_admin",
+			"permissions": []string{
+				"partner.read", "partner.write",
+				"customer.read", "customer.write",
+				"kyc.read", "kyc.review",
+				"wallet.read", "wallet.adjust",
+				"settlement.read", "settlement.run",
+				"invoice.read", "invoice.review",
+				"refund.read", "refund.review",
+				"audit.read", "content_safety.read",
+				"content_safety.dispatch", "system.read",
+				"system.config_write.security", "staff.read",
+				"staff.write", "saga.force_resolve",
+			},
+			"ip_allowed":   true,
+			"mfa_enrolled": true,
+		})
+	}
 }
 
 // 封装 success / fail envelope（与 backend §11 / pkg/errors 对齐）。
@@ -107,6 +145,12 @@ func scopeOf(c *gin.Context) (actorType auth.ActorType, actorID int64) {
 		case auth.Claims:
 			return auth.ActorType(cl.ActorType), cl.ActorID
 		case *auth.Claims:
+			if cl != nil {
+				return auth.ActorType(cl.ActorType), cl.ActorID
+			}
+		case middleware.Claims:
+			return auth.ActorType(cl.ActorType), cl.ActorID
+		case *middleware.Claims:
 			if cl != nil {
 				return auth.ActorType(cl.ActorType), cl.ActorID
 			}

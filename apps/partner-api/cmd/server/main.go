@@ -1,14 +1,16 @@
 // Package main 启动 partner-api HTTP server。
 //
 // 架构层级（per backend §2）：
-//   handler → service → repository → infra
+//
+//	handler → service → repository → infra
 //
 // 关键中间件链（per backend §7.1）：
-//   全局：    RequestID → CORS → SecurityHeaders → Audit
-//   /partner /customer /admin（path-scoped）：
-//             + JWT → CSRF → PIIScrubber → Idempotency → BOLAScope
-//   /webhook： + WebhookIdempotency
-//   /public：  仅全局（无鉴权）
+//
+//	全局：    RequestID → CORS → SecurityHeaders → Audit
+//	/partner /customer /admin（path-scoped）：
+//	          + JWT → CSRF → PIIScrubber → Idempotency → BOLAScope
+//	/webhook： + WebhookIdempotency
+//	/public：  仅全局（无鉴权）
 //
 // W1a 完成 7 middleware + 全部 WithScope 装配；W1c 接 KMS / 真 fyapi.Client。
 package main
@@ -32,6 +34,7 @@ import (
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/config"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/domain"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/handler"
+	idemlookup "github.com/seraph0017/tracenexbiz/apps/partner-api/internal/idempotency"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/db"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/kms"
 	infraredis "github.com/seraph0017/tracenexbiz/apps/partner-api/internal/infra/redis"
@@ -79,7 +82,8 @@ func main() {
 	_ = bizDB
 	_ = fyDB
 
-	router := buildRouter(cfg, rdb, bizDB)
+	w1aDeps, mnsDeps := buildW1aDeps(cfg, bizDB)
+	router := buildRouter(cfg, rdb, bizDB, w1aDeps)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTP.Addr,
@@ -101,7 +105,7 @@ func main() {
 	// SINK 在 server 进程内长轮询 MNS QueueIn 并 dispatch 到注册的 handler。
 	mnsCtx, mnsCancel := context.WithCancel(context.Background())
 	defer mnsCancel()
-	startMNSConsumer(mnsCtx, cfg)
+	startMNSConsumer(mnsCtx, cfg, mnsDeps)
 
 	// 优雅退出（per backend §13.4）
 	stop := make(chan os.Signal, 1)
@@ -152,7 +156,7 @@ func mustBuildKMS(cfg *config.Config) kms.Service {
 //  4. r.GET("/healthz", ...)
 //  5. handler.RegisterW1aRoutes(r, ...)
 //  6. handler.RegisterTODORoutes(r)
-func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB) http.Handler {
+func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB, w1aDeps handler.W1aDeps) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -198,11 +202,15 @@ func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB) http.Han
 	// 注：BOLAScope 不在此链 — WithScope 在每条路由上声明 scope 时已经 inline enforce。
 	// 如果想加 fail-closed safety net（catch 漏挂 WithScope 的路由），可在 chain 末尾再挂
 	// middleware.BOLAScope(bolaLogger) — 它会读取 ctx 中的 scope（无 scope → 404）。
+	var idemDBLookup middleware.IdempotencyDBLookup
+	if bizDB != nil {
+		idemDBLookup = idemlookup.NewDBLookup(mysql.NewIdempotencyRepository(bizDB))
+	}
 	authedChain := []gin.HandlerFunc{
 		middleware.JWT(verifier, revStore, clk),
 		middleware.CSRF(),
 		middleware.PIIScrubber(),
-		middleware.Idempotency(rdb, cfg.IdempotencyTTL),
+		middleware.IdempotencyWithDB(rdb, cfg.IdempotencyTTL, idemDBLookup),
 	}
 	_ = bolaLogger
 
@@ -210,7 +218,7 @@ func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB) http.Han
 	// 这样 gin 的 c.Next() 能正确推进 → 下一个 mw → ... → handler；
 	// 而非鉴权路径（/healthz / /public/* / /webhook/*）直接 skip。
 	for _, mw := range authedChain {
-		r.Use(filterByPrefix(mw, "/partner", "/customer", "/admin", "/api/sdk"))
+		r.Use(filterByPrefix(mw, "/partner", "/customer", "/admin", "/api/partner", "/api/customer", "/api/admin", "/api/sdk"))
 	}
 
 	// Webhook 链：独立 idempotency；只匹配 /webhook 前缀。
@@ -227,7 +235,8 @@ func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB) http.Han
 	r.GET("/healthz/ready", handler.HealthzReady)
 
 	// W1a：auth / partner / customer / kyc / wallet / invitation。
-	handler.RegisterW1aRoutes(r, buildW1aDeps(cfg, bizDB))
+	handler.RegisterW1aRoutes(r, w1aDeps)
+	handler.RegisterW1aRoutes(r.Group("/api"), w1aDeps)
 
 	// Fix-C CRIT-C1: public footer endpoint (合规公示).
 	var bizSettingRepo *mysql.BizSettingRepository
@@ -238,6 +247,7 @@ func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB) http.Han
 
 	// TODO route 占位（per W0 验收）
 	handler.RegisterTODORoutes(r)
+	handler.RegisterTODORoutes(r.Group("/api"))
 
 	return r
 }
@@ -311,15 +321,51 @@ func (bolaLoggerFunc) LogAttempt(actorType string, actorID int64, scope, path st
 		Msg("bola_attempt")
 }
 
+func mustBuildAuthSigner(cfg *config.Config) auth.TokenSigner {
+	if cfg.JWT.SignKeyPEM != "" {
+		signer, err := auth.NewRSASigner([]byte(cfg.JWT.SignKeyPEM), cfg.JWT.KeyID)
+		if err != nil {
+			log.Fatal().Err(err).Msg("auth.NewRSASigner failed (check JWT_SIGN_KEY_PEM)")
+		}
+		return signer
+	}
+	if cfg.Env != config.EnvDev {
+		log.Fatal().Msg("JWT_SIGN_KEY_PEM required in staging/prod")
+	}
+	log.Warn().Msg("JWT_SIGN_KEY_PEM not set — dev fallback HMAC signer in use")
+	return auth.HMACSigner{Secret: []byte("tnbiz-dev-jwt-secret")}
+}
+
+func seedDevAdmin(repo *auth.MemoryRepo, hasher auth.PasswordHasher) {
+	username := os.Getenv("TNBIZ_DEV_ADMIN_USERNAME")
+	password := os.Getenv("TNBIZ_DEV_ADMIN_PASSWORD")
+	if username == "" || password == "" {
+		return
+	}
+	hash, err := hasher.Hash(password)
+	if err != nil {
+		log.Fatal().Err(err).Msg("seed dev admin password hash failed")
+	}
+	repo.SeedCredentials(auth.Credentials{
+		ActorType:    auth.ActorStaff,
+		ActorID:      1,
+		FyUserID:     1,
+		PasswordHash: hash,
+		Email:        "test-admin@tracenex.local",
+		Roles:        []string{"staff_admin", "staff_finance", "staff_compliance", "super_admin"},
+	}, username)
+	log.Info().Str("username", username).Msg("seeded dev admin credential")
+}
+
 // buildW1aDeps 装配 W1a service。
 //
 // W1b：partner / customer / kyc / wallet / invitation 走 GORM repository（bizDB 必须非 nil；
 // nil 时 fail-fast 退回 memory 以避免 dev 启动失败）。auth 暂仍走 memory（W1c 再迁）。
-func buildW1aDeps(cfg *config.Config, bizDB *gorm.DB) handler.W1aDeps {
-	_ = cfg
+func buildW1aDeps(cfg *config.Config, bizDB *gorm.DB) (handler.W1aDeps, outbox.HandlerDeps) {
 	authRepo := auth.NewMemoryRepo()
 	hasher := auth.SimpleHasher{Salt: "tnbiz-dev-salt"}
-	signer := auth.HMACSigner{Secret: []byte("tnbiz-dev-jwt-secret")}
+	signer := mustBuildAuthSigner(cfg)
+	seedDevAdmin(authRepo, hasher)
 	authSvc := auth.NewService(authRepo, auth.NewMemoryRevocation(), hasher,
 		signer, auth.NoopNotifier{}, auth.AlwaysConsented{}, auth.Options{})
 
@@ -330,13 +376,17 @@ func buildW1aDeps(cfg *config.Config, bizDB *gorm.DB) handler.W1aDeps {
 		partnerRepo partner.Repository
 		walletRepo  wallet.Repository
 		kycRepo     kyc.Repository
+		walletGorm  *mysql.WalletRepository
+		auditGorm   *audit.GormStore
 	)
 	if bizDB != nil {
 		invRepo = mysql.NewInvitationRepository(bizDB)
 		custRepo = mysql.NewCustomerRepository(bizDB)
 		partnerRepo = mysql.NewPartnerRepository(bizDB)
-		walletRepo = mysql.NewWalletRepository(bizDB)
+		walletGorm = mysql.NewWalletRepository(bizDB)
+		walletRepo = walletGorm
 		kycRepo = mysql.NewKYCRepository(bizDB)
+		auditGorm = audit.NewGormStore(bizDB)
 	} else {
 		log.Warn().Msg("bizDB unavailable; falling back to in-memory repos (dev/W0 only)")
 		invRepo = invitation.NewMemoryRepo()
@@ -350,6 +400,9 @@ func buildW1aDeps(cfg *config.Config, bizDB *gorm.DB) handler.W1aDeps {
 
 	custFy := customer.NewStubFyAPI()
 	custSvc := customer.NewService(custRepo, &invitationAdapter{svc: invSvc}, custFy)
+	if bizDB != nil {
+		custSvc = custSvc.WithIdempotencyStore(bizDB, mysql.NewIdempotencyRepository(bizDB))
+	}
 	// Fix-C P1-7：consent_text_version guard.
 	cv := consent.NewVersionGuard(cfg.BizSetting)
 	cv.SetDevMode(cfg.Env == config.EnvDev)
@@ -374,10 +427,17 @@ func buildW1aDeps(cfg *config.Config, bizDB *gorm.DB) handler.W1aDeps {
 		kyc.NewStubLinker(),
 	)
 
-	return handler.W1aDeps{
+	w1aDeps := handler.W1aDeps{
 		Auth: authSvc, Partner: partnerSvc, Customer: custSvc,
 		KYC: kycSvc, Wallet: walletSvc, Invitation: invSvc,
 	}
+	mnsDeps := outbox.HandlerDeps{}
+	if bizDB != nil {
+		mnsDeps.WalletOpener = walletOpenAdapter{repo: walletGorm}
+		mnsDeps.PartnerSuspender = partnerSuspendAdapter{svc: partnerSvc}
+		mnsDeps.AuditWriter = auditGorm
+	}
+	return w1aDeps, mnsDeps
 }
 
 // invitationAdapter 把 invitation.Service 暴露为 customer.InvitationResolver。
@@ -433,7 +493,7 @@ func (a *auditEnqueueAdapter) Send(e middleware.AuditEntry) {
 //
 // 未注册 event_type 时 NoopOnUnknown=true → log warning + ack（不阻塞队列）.
 // Phase-1 不注册任何 handler；后续 PR 在此处按 event_type 注册业务回调.
-func startMNSConsumer(ctx context.Context, cfg *config.Config) {
+func startMNSConsumer(ctx context.Context, cfg *config.Config, deps outbox.HandlerDeps) {
 	if cfg.MNS.Backend != "aliyun_mns" {
 		log.Info().Str("backend", cfg.MNS.Backend).Msg("outbox sink: skipped (non-MNS backend)")
 		return
@@ -450,6 +510,7 @@ func startMNSConsumer(ctx context.Context, cfg *config.Config) {
 	consumer, err := outbox.NewMNSConsumer(client, outbox.MNSConsumerOptions{
 		QueueName:     cfg.MNS.QueueIn,
 		DLQName:       cfg.MNS.QueueDLQ,
+		DataRegion:    cfg.MNS.DataRegion,
 		WaitSeconds:   cfg.MNS.LongPollSec,
 		DLQThreshold:  cfg.MNS.DLQThreshold,
 		NoopOnUnknown: true,
@@ -457,7 +518,7 @@ func startMNSConsumer(ctx context.Context, cfg *config.Config) {
 	if err != nil {
 		log.Fatal().Err(err).Msg("outbox sink: NewMNSConsumer failed")
 	}
-	// TODO(post-B5): consumer.Register("<event_type>", handler) 按业务领域注册.
+	outbox.RegisterCoreHandlers(consumer, deps)
 	go func() {
 		log.Info().
 			Str("queue", cfg.MNS.QueueIn).

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/domain"
@@ -35,9 +36,9 @@ const (
 
 // Sentinel.
 var (
-	ErrPartnerNotFound       = errors.New("partner: not found")
-	ErrInvalidTransition     = errors.New("partner: invalid status transition")
-	ErrConsentMissing        = errors.New("partner: consent token invalid or expired")
+	ErrPartnerNotFound        = errors.New("partner: not found")
+	ErrInvalidTransition      = errors.New("partner: invalid status transition")
+	ErrConsentMissing         = errors.New("partner: consent token invalid or expired")
 	ErrEmailAlreadyRegistered = errors.New("partner: email already registered")
 )
 
@@ -58,6 +59,16 @@ type ApplyInput struct {
 
 // Validate 输入校验（不依赖 validator 库；handler 层另做 zod-style）。
 func (in ApplyInput) Validate() error {
+	if err := in.validateProfile(); err != nil {
+		return err
+	}
+	if in.ConsentID <= 0 {
+		return errors.New("partner: consent_id required")
+	}
+	return nil
+}
+
+func (in ApplyInput) validateProfile() error {
 	if in.Type != "enterprise" && in.Type != "individual" {
 		return errors.New("partner: type must be enterprise or individual")
 	}
@@ -69,9 +80,6 @@ func (in ApplyInput) Validate() error {
 	}
 	if !strings.HasPrefix(in.ContactPhone, "+") || len(in.ContactPhone) < 8 {
 		return errors.New("partner: contact_phone must be E.164")
-	}
-	if in.ConsentID <= 0 {
-		return errors.New("partner: consent_id required")
 	}
 	return nil
 }
@@ -89,10 +97,10 @@ type Repository interface {
 
 // ListFilter 列表查询。
 type ListFilter struct {
-	Status   string
-	Search   string // 仅搜 invitation_code / fy_user_id 精确
-	Limit    int
-	Offset   int
+	Status string
+	Search string // 仅搜 invitation_code / fy_user_id 精确
+	Limit  int
+	Offset int
 }
 
 // CryptoPort KMS 加密 + HMAC 索引（与 W1d/W1a 的 infra/kms.Service 对齐）。
@@ -156,6 +164,30 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*domain.Partner, er
 	if now.Sub(at) > 5*time.Minute {
 		return nil, ErrConsentMissing
 	}
+	return s.createApplied(ctx, in)
+}
+
+// AdminCreate creates a partner from the staff console.
+//
+// The admin form only collects contact details. Until Fy-api user creation is
+// wired into this service, use a negative synthetic fy_user_id so the NOT NULL
+// + UNIQUE database invariant remains explicit and cannot collide with real
+// Fy-api user IDs.
+func (s *Service) AdminCreate(ctx context.Context, in ApplyInput) (*domain.Partner, error) {
+	if strings.TrimSpace(in.Type) == "" {
+		in.Type = "enterprise"
+	}
+	if in.FyUserID == 0 {
+		in.FyUserID = pendingFyUserID(s.clock())
+	}
+	if err := in.validateProfile(); err != nil {
+		return nil, err
+	}
+	return s.createApplied(ctx, in)
+}
+
+func (s *Service) createApplied(ctx context.Context, in ApplyInput) (*domain.Partner, error) {
+	now := s.clock()
 	emailHMAC, err := s.crypto.HMACEmail(ctx, strings.ToLower(strings.TrimSpace(in.ContactEmail)))
 	if err != nil {
 		return nil, fmt.Errorf("partner: hmac email: %w", err)
@@ -169,26 +201,38 @@ func (s *Service) Apply(ctx context.Context, in ApplyInput) (*domain.Partner, er
 	}
 	tier := tierForType(in.Type)
 	p := domain.Partner{
-		FyUserID:          in.FyUserID,
-		Status:            StatusApplied,
-		KYCStatus:         0,
-		Tier:              tier,
-		AppliedAt:         now,
-		ContactName:       in.ContactName,
-		ContactPhoneKeyID: keyID,
-		ContactEmail:      in.ContactEmail,
-		ContactEmailHMAC:  emailHMAC,
-		Notes:             in.Note,
+		FyUserID:           in.FyUserID,
+		InvitationCode:     provisionalInvitationCode(now, in.ContactEmail),
+		Status:             StatusApplied,
+		KYCStatus:          0,
+		Tier:               tier,
+		AppliedAt:          now,
+		ContactName:        in.ContactName,
+		ContactPhonePlain:  in.ContactPhone,
+		ContactPhoneCipher: cipher,
+		ContactPhoneKeyID:  keyID,
+		ContactEmail:       in.ContactEmail,
+		ContactEmailHMAC:   emailHMAC,
+		TaxStatus:          domain.TaxIndividual,
+		Notes:              in.Note,
 	}
-	_ = cipher // repository 层负责把 cipher / keyID 写入 contact_phone_cipher 列
 	id, err := s.repo.Insert(ctx, p)
 	if err != nil {
 		return nil, fmt.Errorf("partner: insert: %w", err)
 	}
-	if _, err := s.invitation.Generate(ctx, id); err != nil {
+	code, err := s.invitation.Generate(ctx, id)
+	if err != nil {
 		return nil, fmt.Errorf("partner: generate invitation: %w", err)
 	}
 	p.ID = id
+	p.InvitationCode = code
+	if updated, err := s.repo.Update(ctx, id, func(current domain.Partner) domain.Partner {
+		current.InvitationCode = code
+		return current
+	}); err == nil && updated != nil {
+		p = *updated
+		p.ContactPhonePlain = in.ContactPhone
+	}
 	return &p, nil
 }
 
@@ -335,4 +379,27 @@ func tierForType(t string) int8 {
 		return 3
 	}
 	return 1
+}
+
+func provisionalInvitationCode(now time.Time, email string) string {
+	clean := strings.NewReplacer("@", "-", ".", "-", "+", "-").Replace(strings.ToLower(strings.TrimSpace(email)))
+	if len(clean) > 24 {
+		clean = clean[:24]
+	}
+	return fmt.Sprintf("PENDING-%d-%s", now.UnixNano(), clean)
+}
+
+var pendingFyUserSeq atomic.Int64
+
+func pendingFyUserID(now time.Time) int64 {
+	base := now.UnixNano()
+	if base <= 0 {
+		base = time.Now().UnixNano()
+	}
+	seq := pendingFyUserSeq.Add(1) % 1000
+	id := base + seq
+	if id < 0 {
+		return id
+	}
+	return -id
 }

@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/domain"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/saga"
 )
 
@@ -39,15 +42,19 @@ func (w *fakeWallet) Refund(_ context.Context, _, _ int64, _ string) error {
 func (w *fakeWallet) WriteLog(_ context.Context, _ Request) error { return w.record("log") }
 
 type fakeFyAPI struct {
-	mu     sync.Mutex
-	calls  []string
-	failed bool
+	mu                 sync.Mutex
+	calls              []string
+	failed             bool
+	failTopupRemaining int32
 }
 
 func (f *fakeFyAPI) TopupCustomer(_ context.Context, _, _ int64, _, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "topup")
+	if atomic.AddInt32(&f.failTopupRemaining, -1) >= 0 {
+		return errors.New("fyapi transient")
+	}
 	if f.failed {
 		return errors.New("fyapi 5xx")
 	}
@@ -149,3 +156,67 @@ func TestAllocate_CompensationFailureSurfaces(t *testing.T) {
 		t.Fatalf("expected compensation failure got %v", err)
 	}
 }
+
+func TestAllocate_SweepRetriesRegisteredFyTopup(t *testing.T) {
+	w := &fakeWallet{}
+	f := &fakeFyAPI{failTopupRemaining: 2}
+	repo := saga.NewMemRepo()
+	o := saga.NewOrchestrator(repo, fakeTx{}, nil)
+	svc := NewService(o, w, f, fakeLookup{fyID: 100})
+	req := Request{SagaID: saga.MustNewSagaID(), PartnerID: 1, CustomerID: 2, Amount: 5000, OperatorID: 9}
+
+	if err := svc.Run(context.Background(), req); err == nil {
+		t.Fatal("expected first fyapi failure")
+	}
+	step, err := repo.GetStep(context.Background(), req.SagaID, StepFyTopup)
+	if err != nil {
+		t.Fatalf("GetStep: %v", err)
+	}
+	if saga.Status(step.Status) != saga.StatusFailed || step.Attempts != 1 {
+		t.Fatalf("initial step=%+v", step)
+	}
+	rewindMemStep(t, repo, req.SagaID, StepFyTopup)
+	res, err := o.Sweep(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Sweep #1: %v", err)
+	}
+	if res.Retried != 1 {
+		t.Fatalf("Sweep #1 result=%+v", res)
+	}
+	rewindMemStep(t, repo, req.SagaID, StepFyTopup)
+	res, err = o.Sweep(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("Sweep #2: %v", err)
+	}
+	if res.Retried != 1 {
+		t.Fatalf("Sweep #2 result=%+v", res)
+	}
+	step, _ = repo.GetStep(context.Background(), req.SagaID, StepFyTopup)
+	if saga.Status(step.Status) != saga.StatusCommitted || step.Attempts != 3 {
+		t.Fatalf("after sweep step=%+v", step)
+	}
+	if len(f.calls) != 3 {
+		t.Fatalf("fyapi calls=%v", f.calls)
+	}
+}
+
+func rewindMemStep(t *testing.T, repo *saga.MemRepo, sagaID, stepName string) {
+	t.Helper()
+	steps, err := repo.GetByID(context.Background(), sagaID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	for _, step := range steps {
+		if step.StepName == stepName {
+			cp := *step
+			cp.UpdatedAt = time.Now().UTC().Add(-time.Hour)
+			if err := repo.Save(context.Background(), &cp); err != nil {
+				t.Fatalf("Save rewind: %v", err)
+			}
+			return
+		}
+	}
+	t.Fatalf("step %s not found in %+v", stepName, steps)
+}
+
+var _ = domain.SagaStep{}

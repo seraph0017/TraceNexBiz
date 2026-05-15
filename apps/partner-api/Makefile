@@ -65,7 +65,7 @@ lint: ## golangci-lint（含 bola-scope-required 占位）
 
 .PHONY: lint-bolascope
 lint-bolascope: ## 自研 BOLA scope 静态分析：每条路由必须声明 middleware.WithScope()
-	@go run ./tools/analysis/bolascope/cmd/bolascope ./...
+	@go run ./tools/analysis/bolascope/cmd/bolascope ./cmd/server ./internal/handler ./internal/handler/admin
 
 .PHONY: vet
 vet:

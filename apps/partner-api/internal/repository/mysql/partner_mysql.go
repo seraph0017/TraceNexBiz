@@ -39,7 +39,7 @@ func selectForUpdate(tx *gorm.DB) *gorm.DB {
 type partnerRow struct {
 	ID                  int64          `gorm:"primaryKey;column:id"`
 	FyUserID            int64          `gorm:"column:fy_user_id;uniqueIndex"`
-	InvitationCode     string         `gorm:"column:invitation_code;uniqueIndex;size:64"`
+	InvitationCode      string         `gorm:"column:invitation_code;uniqueIndex;size:64"`
 	Status              string         `gorm:"column:status;size:32;index:idx_partner_status"`
 	KYCType             int8           `gorm:"column:kyc_type"`
 	KYCStatus           int8           `gorm:"column:kyc_status;index:idx_partner_kyc"`
@@ -201,6 +201,7 @@ func rowToPartner(r *partnerRow) *domain.Partner {
 		ApprovedAt:          r.ApprovedAt,
 		ApprovedBy:          r.ApprovedBy,
 		ContactName:         r.ContactName,
+		ContactPhoneCipher:  r.ContactPhoneCipher,
 		ContactPhoneKeyID:   r.ContactPhoneKeyID,
 		ContactEmail:        r.ContactEmail,
 		ContactEmailHMAC:    r.ContactEmailHMAC,
@@ -236,6 +237,7 @@ func partnerToRow(p domain.Partner) partnerRow {
 		ApprovedAt:          p.ApprovedAt,
 		ApprovedBy:          p.ApprovedBy,
 		ContactName:         p.ContactName,
+		ContactPhoneCipher:  p.ContactPhoneCipher,
 		ContactPhoneKeyID:   p.ContactPhoneKeyID,
 		ContactEmail:        p.ContactEmail,
 		ContactEmailHMAC:    p.ContactEmailHMAC,

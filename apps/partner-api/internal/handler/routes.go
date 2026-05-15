@@ -14,7 +14,7 @@ import (
 // W1 各 agent 在自己的 group 下增补 endpoint。
 //
 // 每条占位路由都挂 middleware.WithScope — BOLA fail-closed 政策要求所有路由必须声明 scope。
-func RegisterTODORoutes(r *gin.Engine) {
+func RegisterTODORoutes(r gin.IRouter) {
 	// W1b: Partner 渠道商后台（backend §4.4）
 	partnerGroup := r.Group("/partner")
 	partnerGroup.GET("/_status", middleware.WithScope("partner_self"), todoHandler("partner"))

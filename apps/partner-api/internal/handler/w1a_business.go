@@ -5,9 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/domain"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/middleware"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/customer"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/invitation"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/kyc"
@@ -53,6 +57,107 @@ func partnerApplyHandler(s *partner.Service) gin.HandlerFunc {
 	}
 }
 
+type adminPartnerBody struct {
+	ContactName  string `json:"contact_name" binding:"required"`
+	ContactEmail string `json:"contact_email" binding:"required,email"`
+	ContactPhone string `json:"contact_phone" binding:"required"`
+}
+
+func partnerListHandler(s *partner.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		if page < 1 {
+			page = 1
+		}
+		if limit <= 0 || limit > 200 {
+			limit = 50
+		}
+		rows, err := s.List(c.Request.Context(), partner.ListFilter{
+			Status: partnerStatusFromAdmin(c.Query("status")),
+			Search: strings.TrimSpace(c.Query("q")),
+			Limit:  limit,
+			Offset: (page - 1) * limit,
+		})
+		if err != nil {
+			fail(c, http.StatusInternalServerError, "SYS_PANIC", "服务异常", err.Error())
+			return
+		}
+		items := make([]gin.H, 0, len(rows))
+		for i := range rows {
+			items = append(items, partnerListDTO(rows[i]))
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"data":    items,
+			"error":   nil,
+			"meta": gin.H{
+				"total": len(items),
+				"page":  page,
+				"limit": limit,
+			},
+		})
+	}
+}
+
+func partnerCreateHandler(s *partner.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var b adminPartnerBody
+		if err := c.ShouldBindJSON(&b); err != nil {
+			fail(c, http.StatusBadRequest, "BIZ_VALID_BODY", "请求体无效", "invalid body")
+			return
+		}
+		phone := strings.TrimSpace(b.ContactPhone)
+		if phone != "" && !strings.HasPrefix(phone, "+") {
+			phone = "+86" + phone
+		}
+		p, err := s.AdminCreate(c.Request.Context(), partner.ApplyInput{
+			Type:         "enterprise",
+			BusinessName: strings.TrimSpace(b.ContactName),
+			ContactName:  strings.TrimSpace(b.ContactName),
+			ContactPhone: phone,
+			ContactEmail: strings.TrimSpace(b.ContactEmail),
+			Note:         "created_by_admin",
+		})
+		switch {
+		case errors.Is(err, partner.ErrEmailAlreadyRegistered):
+			fail(c, http.StatusConflict, "BIZ_PARTNER_EMAIL_DUP", "邮箱已注册", "email already registered")
+			return
+		case errors.Is(err, partner.ErrConsentMissing):
+			fail(c, http.StatusUnprocessableEntity, "BIZ_VALID_CONSENT", "需要有效同意", "consent missing")
+			return
+		case err != nil:
+			fail(c, http.StatusBadRequest, "BIZ_VALID_INPUT", "请求参数错误", err.Error())
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{
+			"success": true,
+			"data":    partnerListDTO(*p),
+			"error":   nil,
+		})
+	}
+}
+
+func partnerDetailHandler(s *partner.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			fail(c, http.StatusBadRequest, "BIZ_VALID_PATH", "路径参数错误", "bad id")
+			return
+		}
+		p, err := s.Get(c.Request.Context(), id)
+		if err != nil {
+			fail(c, http.StatusNotFound, "BIZ_RES_NOT_FOUND", "未找到", "not found")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"data":    partnerDetailDTO(*p),
+			"error":   nil,
+		})
+	}
+}
+
 func partnerMeHandler(s *partner.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		_, actorID := scopeOf(c)
@@ -84,6 +189,104 @@ func partnerApproveHandler(s *partner.Service) gin.HandlerFunc {
 		}
 		ok(c, http.StatusOK, gin.H{"status": updated.Status, "approved_at": updated.ApprovedAt})
 	}
+}
+
+func partnerListDTO(p domain.Partner) gin.H {
+	return gin.H{
+		"id":                   p.ID,
+		"display_name":         partnerDisplayName(p),
+		"contact_email_masked": maskEmail(p.ContactEmail),
+		"status":               adminPartnerStatus(p.Status),
+		"kyc_status":           kycStatusText(p.KYCStatus),
+		"terminated_at":        timeOrNil(p.TerminatedAt),
+		"grace_period_ends_at": nil,
+		"created_at":           p.CreatedAt,
+	}
+}
+
+func partnerDetailDTO(p domain.Partner) gin.H {
+	out := partnerListDTO(p)
+	out["contact_phone_masked"] = maskPhone(p.ContactPhonePlain)
+	out["bank_account_masked"] = ""
+	out["monthly_gross"] = 0
+	out["monthly_net"] = 0
+	out["customers_count"] = 0
+	return out
+}
+
+func partnerDisplayName(p domain.Partner) string {
+	if strings.TrimSpace(p.ContactName) != "" {
+		return p.ContactName
+	}
+	if strings.TrimSpace(p.ContactEmail) != "" {
+		return p.ContactEmail
+	}
+	return "Partner #" + strconv.FormatInt(p.ID, 10)
+}
+
+func adminPartnerStatus(s domain.PartnerStatus) string {
+	switch s {
+	case domain.PartnerStatusApproved, domain.PartnerStatusApplied, domain.PartnerStatusReviewing:
+		return "active"
+	case domain.PartnerStatusFrozen, domain.PartnerStatusSuspended:
+		return "suspended"
+	case domain.PartnerStatusTerminated, domain.PartnerStatusRejected:
+		return "terminated"
+	default:
+		return "active"
+	}
+}
+
+func partnerStatusFromAdmin(s string) string {
+	switch s {
+	case "active":
+		return string(domain.PartnerStatusApproved)
+	case "suspended":
+		return string(domain.PartnerStatusSuspended)
+	case "terminated", "terminating":
+		return string(domain.PartnerStatusTerminated)
+	default:
+		return ""
+	}
+}
+
+func kycStatusText(status int8) string {
+	switch status {
+	case 1:
+		return "submitted"
+	case 2:
+		return "approved"
+	case 3:
+		return "rejected"
+	case 4:
+		return "expired"
+	default:
+		return "pending"
+	}
+}
+
+func maskEmail(email string) string {
+	email = strings.TrimSpace(email)
+	at := strings.Index(email, "@")
+	if at <= 1 {
+		return email
+	}
+	return email[:1] + "***" + email[at:]
+}
+
+func maskPhone(phone string) string {
+	phone = strings.TrimSpace(phone)
+	if len(phone) <= 7 {
+		return phone
+	}
+	return phone[:3] + "****" + phone[len(phone)-4:]
+}
+
+func timeOrNil(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t
 }
 
 type partnerTerminateBody struct {
@@ -157,6 +360,8 @@ func customerTransferHandler(s *customer.Service) gin.HandlerFunc {
 		log, err := s.RequestTransfer(c.Request.Context(), customer.TransferRequestInput{
 			CustomerID: actorID, FromPartnerID: actorID, ToPartnerID: b.ToPartnerID,
 			InitiatorType: "customer", InitiatorID: actorID, Reason: b.Reason,
+			IdempotencyKey: c.GetHeader(middleware.HeaderIdemKey),
+			TraceID:        middleware.TraceIDFrom(c),
 		})
 		if err != nil {
 			fail(c, http.StatusBadRequest, "BIZ_CUSTOMER_TRANSFER", "切换失败", err.Error())
@@ -171,6 +376,8 @@ func customerEraseHandler(s *customer.Service) gin.HandlerFunc {
 		_, actorID := scopeOf(c)
 		if err := s.SubmitErase(c.Request.Context(), customer.EraseInput{
 			CustomerID: actorID, PartnerID: actorID, Reason: "pipl",
+			IdempotencyKey: c.GetHeader(middleware.HeaderIdemKey),
+			TraceID:        middleware.TraceIDFrom(c),
 		}); err != nil {
 			fail(c, http.StatusInternalServerError, "BIZ_PIPL_ERASE", "右遗忘失败", err.Error())
 			return

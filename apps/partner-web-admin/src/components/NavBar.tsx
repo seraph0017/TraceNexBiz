@@ -42,9 +42,6 @@ export function NavBar(): JSX.Element {
         borderBottom: "1px solid #1e293b",
       }}
     >
-      <a href="#main" className="visually-hidden" style={{ color: "#fff" }}>
-        Skip to main content
-      </a>
       <strong style={{ fontSize: 16, color: "#fbbf24" }}>TraceNex Admin</strong>
       <nav style={{ display: "flex", gap: 4, flex: 1, flexWrap: "wrap" }} aria-label="primary">
         {LINKS.map((l) => (

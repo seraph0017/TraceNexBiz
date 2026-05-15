@@ -16,7 +16,10 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/domain"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/saga"
 )
 
 // 状态枚举（与 domain.CustomerStatus 对齐）。
@@ -32,20 +35,20 @@ const (
 
 // JoinedVia 加入方式。
 const (
-	JoinedInvitation         = "invitation"
-	JoinedManualCreate       = "manual_create"
-	JoinedSelfRegisterWith   = "self_register_with_code"
-	JoinedDirect             = "direct"
+	JoinedInvitation       = "invitation"
+	JoinedManualCreate     = "manual_create"
+	JoinedSelfRegisterWith = "self_register_with_code"
+	JoinedDirect           = "direct"
 )
 
 // Sentinel.
 var (
-	ErrCustomerNotFound        = errors.New("customer: not found")
-	ErrAlreadyDirect           = errors.New("customer: already direct")
-	ErrAlreadyAffiliated       = errors.New("customer: already affiliated to partner")
-	ErrSelfTransferNotAllowed  = errors.New("customer: cannot transfer to same partner")
-	ErrInvitationRequired      = errors.New("customer: invitation_code required (防绕过)")
-	ErrInvalidStatusForOp      = errors.New("customer: invalid status for operation")
+	ErrCustomerNotFound       = errors.New("customer: not found")
+	ErrAlreadyDirect          = errors.New("customer: already direct")
+	ErrAlreadyAffiliated      = errors.New("customer: already affiliated to partner")
+	ErrSelfTransferNotAllowed = errors.New("customer: cannot transfer to same partner")
+	ErrInvitationRequired     = errors.New("customer: invitation_code required (防绕过)")
+	ErrInvalidStatusForOp     = errors.New("customer: invalid status for operation")
 )
 
 // RegisterInput 客户注册（PRD §8.2 + 防绕过 §7.9）。
@@ -113,11 +116,13 @@ func (alwaysOKConsent) Verify(string) error { return nil }
 
 // Service 客户主数据门面。
 type Service struct {
-	repo    Repository
-	inv     InvitationResolver
-	fyapi   FyAPIPort
-	clock   func() time.Time
-	consent ConsentVerifier
+	repo       Repository
+	inv        InvitationResolver
+	fyapi      FyAPIPort
+	clock      func() time.Time
+	consent    ConsentVerifier
+	idemDB     *gorm.DB
+	idemInsert saga.IdempotencyInserter
 }
 
 // NewService .
@@ -130,6 +135,13 @@ func (s *Service) WithConsentVerifier(v ConsentVerifier) *Service { s.consent = 
 
 // WithClock 测试注入。
 func (s *Service) WithClock(c func() time.Time) *Service { s.clock = c; return s }
+
+// WithIdempotencyStore enables DB-backed idempotency records for mutation entries.
+func (s *Service) WithIdempotencyStore(db *gorm.DB, inserter saga.IdempotencyInserter) *Service {
+	s.idemDB = db
+	s.idemInsert = inserter
+	return s
+}
 
 // Register 被邀请客户注册（场景 C）。
 //
