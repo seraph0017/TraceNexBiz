@@ -61,14 +61,14 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
-// silent refresh: 401 触发一次 /auth/refresh，成功后 retry，失败抛 logout 事件
+// silent refresh: 401 触发一次 /api/public/auth/refresh，成功后 retry，失败抛 logout 事件
 let refreshing: Promise<void> | null = null;
 async function trySilentRefresh(): Promise<void> {
   if (refreshing) return refreshing;
   refreshing = (async () => {
     try {
       await axios.post(
-        `${API_BASE}auth/refresh`.replace("//", "/"),
+        `${API_BASE}api/public/auth/refresh`.replace(/([^:])\/\//g, "$1/"),
         {},
         { withCredentials: true, timeout: 10_000 },
       );

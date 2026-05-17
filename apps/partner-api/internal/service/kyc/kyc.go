@@ -23,14 +23,14 @@ import (
 
 // 状态枚举。
 const (
-	StatusDraft        = "draft"
-	StatusSubmitted    = "submitted"
-	StatusUnderReview  = "under_review"
-	StatusApproved     = "approved"
-	StatusRejected     = "rejected"
-	StatusExpiring     = "expiring"
-	StatusExpired      = "expired"
-	StatusFrozenYrly   = "frozen_yearly_limit"
+	StatusDraft       = "draft"
+	StatusSubmitted   = "submitted"
+	StatusUnderReview = "under_review"
+	StatusApproved    = "approved"
+	StatusRejected    = "rejected"
+	StatusExpiring    = "expiring"
+	StatusExpired     = "expired"
+	StatusFrozenYrly  = "frozen_yearly_limit"
 )
 
 // Type 申请类型。
@@ -53,19 +53,19 @@ var (
 // PII 字段（legal_person_id / bank_account / alipay_open_id）以明文承载；
 // service 在加密后立即清空内存（runtime.GC + zero []byte 由 W1a infra/kms 实现）。
 type SubmitInput struct {
-	FyUserID              int64
-	Type                  int8
-	BusinessLicenseURL    string
-	BusinessLicenseOCR    string // OCR 结果文本（W1c 接 OCR 后回填）
-	LegalPersonName       string
-	LegalPersonID         string
-	LegalPersonIDURL      string
-	BankAccount           string // Phase 2A
-	AlipayOpenID          string
-	AlipayRealName        string
-	BiometricLivenessURL  string
-	ConsentSensitivePIID  int64
-	ConsentBiometricID    int64
+	FyUserID             int64
+	Type                 int8
+	BusinessLicenseURL   string
+	BusinessLicenseOCR   string // OCR 结果文本（W1c 接 OCR 后回填）
+	LegalPersonName      string
+	LegalPersonID        string
+	LegalPersonIDURL     string
+	BankAccount          string // Phase 2A
+	AlipayOpenID         string
+	AlipayRealName       string
+	BiometricLivenessURL string
+	ConsentSensitivePIID int64
+	ConsentBiometricID   int64
 }
 
 // ApprovalInput staff 审核入参。
@@ -273,6 +273,30 @@ func (s *Service) FindByFyUser(ctx context.Context, fyUserID int64) (*domain.KYC
 	return a, nil
 }
 
+// FindByID returns one KYC application for staff review views.
+func (s *Service) FindByID(ctx context.Context, id int64) (*domain.KYCApplication, error) {
+	a, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("kyc: find by id: %w", err)
+	}
+	if a == nil {
+		return nil, ErrKYCNotFound
+	}
+	return a, nil
+}
+
+// ListPendingReview returns submitted / under_review applications for the
+// staff KYC queue.
+func (s *Service) ListPendingReview(ctx context.Context, limit int) ([]domain.KYCApplication, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	return s.repo.ListPendingReview(ctx, limit)
+}
+
 // 私有 helper
 
 func (s *Service) validateInput(in SubmitInput) error {
@@ -328,8 +352,8 @@ func (s *Service) verifyUploads(ctx context.Context, in SubmitInput) error {
 func (s *Service) encryptInto(ctx context.Context, in SubmitInput) (domain.KYCApplication, error) {
 	a := domain.KYCApplication{
 		FyUserID: in.FyUserID, Type: in.Type, Status: StatusDraft,
-		BusinessLicenseURL: in.BusinessLicenseURL,
-		LegalPersonIDURL:   in.LegalPersonIDURL,
+		BusinessLicenseURL:   in.BusinessLicenseURL,
+		LegalPersonIDURL:     in.LegalPersonIDURL,
 		BiometricLivenessURL: in.BiometricLivenessURL,
 	}
 	if in.LegalPersonName != "" {

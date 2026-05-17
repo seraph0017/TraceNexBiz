@@ -42,10 +42,13 @@ import (
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/outbox"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/repository/mysql"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/auth"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/content_safety"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/customer"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/invitation"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/kyc"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/partner"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/saga_admin"
+	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/staff"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/internal/service/wallet"
 	"github.com/seraph0017/tracenexbiz/apps/partner-api/pkg/consent"
 
@@ -238,6 +241,11 @@ func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB, w1aDeps 
 	handler.RegisterW1aRoutes(r, w1aDeps)
 	handler.RegisterW1aRoutes(r.Group("/api"), w1aDeps)
 
+	adminCompatDeps := buildAdminCompatDeps(bizDB, w1aDeps, walletGormFromDeps(bizDB))
+	handler.RegisterAdminCompatRoutes(r, adminCompatDeps)
+	handler.RegisterAdminCompatRoutes(r.Group("/api"), adminCompatDeps)
+	handler.RegisterPublicCompatRoutes(r)
+
 	// Fix-C CRIT-C1: public footer endpoint (合规公示).
 	var bizSettingRepo *mysql.BizSettingRepository
 	if bizDB != nil {
@@ -250,6 +258,52 @@ func buildRouter(cfg *config.Config, rdb *redis.Client, bizDB *gorm.DB, w1aDeps 
 	handler.RegisterTODORoutes(r.Group("/api"))
 
 	return r
+}
+
+func walletGormFromDeps(bizDB *gorm.DB) *mysql.WalletRepository {
+	if bizDB == nil {
+		return nil
+	}
+	return mysql.NewWalletRepository(bizDB)
+}
+
+func buildAdminCompatDeps(bizDB *gorm.DB, w1aDeps handler.W1aDeps, walletRepo *mysql.WalletRepository) handler.AdminCompatDeps {
+	var contentSvc *content_safety.Service
+	if bizDB != nil {
+		contentSvc = content_safety.NewService(mysql.NewContentSafetyRepository(bizDB), &content_safety.CapturingAuthorityClient{})
+	} else {
+		contentSvc = content_safety.NewService(content_safety.NewMemoryRepo(), &content_safety.CapturingAuthorityClient{})
+	}
+	staffRepo := staff.NewMemoryRepo()
+	staffSvc := staff.NewService(staffRepo, staff.NewCIDRAllowlist([]string{"0.0.0.0/0", "::/0"}))
+	now := time.Now()
+	_, _ = staffRepo.Insert(context.Background(), &staff.Staff{
+		Username: "root", Role: staff.RoleSuperAdmin, Email: "root@tracenex.local",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	})
+	sagaSvc := saga_admin.NewService(
+		saga_admin.NewMemoryTokenStore(),
+		saga_admin.NewMemoryCooldownStore(),
+		&saga_admin.StubResolver{},
+		&saga_admin.CapturingAudit{},
+	)
+	settings := map[string]string{
+		"compliance.icp_record_no":            "",
+		"compliance.gen_ai_filing_no":         "",
+		"compliance.algorithm_filing_no":      "",
+		"compliance.report_phone_12377_link":  "https://www.12377.cn/",
+		"compliance.consent_text_version":     "2026-05-test",
+		"settlement.min_payout_fen":           "10000",
+		"settlement.tax_withholding_enabled":  "true",
+		"saga.force_resolve_cooldown_minutes": "30",
+		"idempotency.ttl_hours":               "24",
+	}
+	_ = walletRepo
+	return handler.AdminCompatDeps{
+		Partner: w1aDeps.Partner, KYC: w1aDeps.KYC, Wallet: w1aDeps.Wallet,
+		ContentSafety: contentSvc, Staff: staffSvc, SagaAdmin: sagaSvc,
+		BizSettings: settings,
+	}
 }
 
 // mustBuildVerifier 装配 JWT verifier；dev 缺 PEM 时降级到 devNullVerifier。

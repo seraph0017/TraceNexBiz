@@ -41,9 +41,6 @@ export function NavBar(): JSX.Element {
         zIndex: 50,
       }}
     >
-      <a href="#main" className="visually-hidden">
-        Skip to main content
-      </a>
       <strong style={{ fontSize: 16 }}>TraceNex Partner</strong>
       <nav style={{ display: "flex", gap: 4, flex: 1, flexWrap: "wrap" }} aria-label="primary">
         {LINKS.map((l) => (

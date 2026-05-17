@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json --emitDeclarationOnly --noEmit",
+    "build": "tsc -p tsconfig.json --noEmit",
     "lint": "echo 'TODO(W1e): eslint'",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "echo 'TODO(W1e): vitest'"

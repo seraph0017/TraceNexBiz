@@ -12,7 +12,7 @@
 //   - getAuthToken    (optional, for non-cookie bearer-token flows)
 //   - onAuthError     (callback on 401-after-refresh-failed; default = dispatch
 //                      "tnbiz:auth:expired" CustomEvent on window)
-//   - refreshPath     (default: "auth/refresh"; resolved against baseURL)
+//   - refreshPath     (default: "api/public/auth/refresh"; resolved against baseURL)
 //   - timeout         (default 15s)
 
 import axios from "axios";
@@ -63,7 +63,7 @@ function defaultOnAuthError(): void {
 
 export function createApiClient(opts: CreateApiClientOptions = {}): AxiosInstance {
   const baseURL = opts.baseURL ?? defaultBaseURL();
-  const refreshPath = opts.refreshPath ?? "auth/refresh";
+  const refreshPath = opts.refreshPath ?? "api/public/auth/refresh";
   const timeout = opts.timeout ?? 15_000;
   const onAuthError = opts.onAuthError ?? defaultOnAuthError;
 

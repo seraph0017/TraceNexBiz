@@ -142,6 +142,5 @@
   "common.retry": "Retry",
   "common.back_home": "Back to home",
   "notfound.title": "Page not found",
-  "notfound.body": "The page you requested is unavailable or the link is incorrect.",
-  "skip_to_main": "Skip to main content"
+  "notfound.body": "The page you requested is unavailable or the link is incorrect."
 }

@@ -1,4 +1,4 @@
-// 顶部导航 —— 包含跳过链接（无障碍 WCAG 2.4.1）+ 语言切换
+// 顶部导航 —— 包含语言切换
 import * as React from "react";
 import { Link, NavLink } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -29,25 +29,6 @@ export function NavBar(): JSX.Element {
         borderBottom: "1px solid #2a2f36",
       }}
     >
-      <a
-        href="#main"
-        style={{
-          position: "absolute",
-          left: -9999,
-          top: 0,
-          color: "#fff",
-          background: "#1d4ed8",
-          padding: "4px 8px",
-        }}
-        onFocus={(e) => {
-          e.currentTarget.style.left = "8px";
-        }}
-        onBlur={(e) => {
-          e.currentTarget.style.left = "-9999px";
-        }}
-      >
-        {t("skip_to_main")}
-      </a>
       <nav
         aria-label="primary"
         style={{

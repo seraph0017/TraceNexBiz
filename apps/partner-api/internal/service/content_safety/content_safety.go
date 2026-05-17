@@ -2,12 +2,12 @@
 //
 // W1c 范围（partner-api 侧）：
 //
-//   1. 接收 W1d Fy-api 端模型调用拦截事件 → INSERT content_safety_event
-//      （Fy-api 通过 /api/internal/content-safety/event 上报，本包只负责 service / repo / dispatcher）
-//   2. admin 审核 endpoint：list / detail / 改 disposition / 重派 12377
-//   3. 12377 / 公安网安上报通道：dispatcher 拉 pending → HTTP 提交 → mark submitted
-//      24h SLA：sla_due_at = created_at + 24h；超期未 submitted → alert
-//   4. 失败 retry queue：retry_count < 5 → 回 pending；>= 5 → dead_letter + alert
+//  1. 接收 W1d Fy-api 端模型调用拦截事件 → INSERT content_safety_event
+//     （Fy-api 通过 /api/internal/content-safety/event 上报，本包只负责 service / repo / dispatcher）
+//  2. admin 审核 endpoint：list / detail / 改 disposition / 重派 12377
+//  3. 12377 / 公安网安上报通道：dispatcher 拉 pending → HTTP 提交 → mark submitted
+//     24h SLA：sla_due_at = created_at + 24h；超期未 submitted → alert
+//  4. 失败 retry queue：retry_count < 5 → 回 pending；>= 5 → dead_letter + alert
 package content_safety
 
 import (
@@ -178,6 +178,11 @@ func (s *Service) ListEvents(ctx context.Context, q ListQuery) ([]Event, int, er
 // ListReports admin drill-down.
 func (s *Service) ListReports(ctx context.Context, q ListQuery) ([]Report, int, error) {
 	return s.repo.ListReports(ctx, q)
+}
+
+// GetReport returns one 12377 / authority report for admin drill-down.
+func (s *Service) GetReport(ctx context.Context, id int64) (*Report, error) {
+	return s.repo.GetReport(ctx, id)
 }
 
 // DispatchOnce 拉 pending → submit → 标记 submitted/failed.

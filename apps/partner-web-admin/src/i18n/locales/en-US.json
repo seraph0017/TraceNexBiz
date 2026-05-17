@@ -200,6 +200,7 @@
   "errors": {
     "unknown": "未知错误，请稍后重试",
     "network": "网络异常",
+    "feature_not_wired": "测试环境暂未接入该功能",
     "auth": {
       "invalid": "账号或密码错误",
       "mfa_required": "请完成 MFA 验证",

@@ -142,6 +142,5 @@
   "common.retry": "重试",
   "common.back_home": "返回首页",
   "notfound.title": "页面不存在",
-  "notfound.body": "您访问的页面已下线或链接有误。",
-  "skip_to_main": "跳转到主要内容"
+  "notfound.body": "您访问的页面已下线或链接有误。"
 }
