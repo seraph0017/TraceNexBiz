@@ -41,6 +41,7 @@ import shlex
 import subprocess
 import tarfile
 import tempfile
+import shutil
 from pathlib import Path
 
 from fabric import Connection, task
@@ -58,6 +59,7 @@ TARGETS = {
         "namespace": "tracenexbiz",
         "repo": "partner-api",
         "repo_url": "git@github.com:seraph0017/TraceNexBiz.git",
+        "nginx_conf": "/etc/nginx/conf.d/tracenex-test.conf",
         "region": "cn-chengdu",
         "internal_ip": "172.24.203.146",
         "rds_host": "rm-2vcnldc9an5s17ho9.mysql.cn-chengdu.rds.aliyuncs.com",
@@ -116,7 +118,11 @@ def _config(target: str | None = None) -> dict[str, object]:
 
     cfg["key"] = os.path.expanduser(str(cfg.get("key") or ""))
     cfg["env_file"] = os.getenv("TNBIZ_ENV_FILE", f"{cfg['app_dir']}/config/partner-api.env")
-    cfg["nginx_conf"] = os.getenv("TNBIZ_NGINX_CONF", "/etc/nginx/conf.d/tracenexbiz.conf")
+    cfg["config_dir"] = os.getenv("TNBIZ_CONFIG_DIR", f"{cfg['app_dir']}/config")
+    cfg["nginx_conf"] = os.getenv(
+        "TNBIZ_NGINX_CONF",
+        str(cfg.get("nginx_conf") or "/etc/nginx/conf.d/tracenexbiz.conf"),
+    )
     cfg["log_dir"] = os.getenv("TNBIZ_LOG_DIR", f"{cfg['app_dir']}/logs")
     cfg["data_dir"] = os.getenv("TNBIZ_DATA_DIR", f"{cfg['app_dir']}/data")
     cfg["health_path"] = os.getenv("TNBIZ_HEALTH_PATH", "/healthz")
@@ -207,6 +213,32 @@ def _create_local_worktree_archive() -> Path:
             if path.is_file():
                 tar.add(path, arcname=rel)
     return archive
+
+
+def _find_ca_bundle() -> Path:
+    candidates = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/opt/homebrew/etc/openssl@3/cert.pem",
+        "/usr/local/etc/openssl@3/cert.pem",
+    ]
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.exists():
+            return path
+    raise FileNotFoundError("CA bundle not found; install ca-certificates or set up OpenSSL cert.pem")
+
+
+def _build_local_image_context() -> Path:
+    repo_root = Path(__file__).resolve().parent
+    api_dir = repo_root / "apps" / "partner-api"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="tracenexbiz-image-context-"))
+    env = dict(os.environ)
+    env.update({"GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0", "GOFLAGS": "-trimpath"})
+    subprocess.run(["go", "build", "-o", str(tmp_dir / "partner-api"), "./cmd/server"], cwd=api_dir, env=env, check=True)
+    subprocess.run(["go", "build", "-o", str(tmp_dir / "outbox-poller"), "./cmd/outbox-poller"], cwd=api_dir, env=env, check=True)
+    shutil.copy2(api_dir / "Dockerfile", tmp_dir / "Dockerfile")
+    shutil.copy2(_find_ca_bundle(), tmp_dir / "ca-certificates.crt")
+    return tmp_dir
 
 
 @task(help={"target": "target name: ceshi"})
@@ -333,7 +365,7 @@ def build(ctx, target="ceshi", tag="", ref="", pull=True, no_cache=False):
     }
 )
 def build_local(ctx, target="ceshi", tag="", pull=True, no_cache=False):
-    """Build the partner-api image on the server from the local worktree, including uncommitted files."""
+    """Build the partner-api image on the server from locally compiled linux/amd64 binaries."""
     tag = _validate_arg("tag", tag)
     cfg = _config(target)
     c = _connect(cfg)
@@ -344,8 +376,13 @@ def build_local(ctx, target="ceshi", tag="", pull=True, no_cache=False):
     if no_cache:
         flags.append("--no-cache")
 
-    archive = _create_local_worktree_archive()
-    remote_archive = f"/tmp/tracenexbiz-worktree-{tag}.tar.gz"
+    image_context = _build_local_image_context()
+    archive = Path(tempfile.mkdtemp(prefix="tracenexbiz-image-archive-")) / "image-context.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for path in image_context.iterdir():
+            if path.is_file():
+                tar.add(path, arcname=path.name)
+    remote_archive = f"/tmp/tracenexbiz-image-context-{tag}.tar.gz"
     c.put(str(archive), remote_archive)
 
     image = _q(_image(cfg, tag))
@@ -359,7 +396,7 @@ def build_local(ctx, target="ceshi", tag="", pull=True, no_cache=False):
                 f"mkdir -p {build_dir}",
                 f"tar -xzf {_q(remote_archive)} -C {build_dir}",
                 f"cd {build_dir}",
-                f"podman build {flag_str} -t {image} -f apps/partner-api/Dockerfile apps/partner-api",
+                f"podman build {flag_str} -t {image} -f Dockerfile .",
                 f"rm -rf {build_dir} {_q(remote_archive)}",
             ]
         ),
@@ -376,7 +413,7 @@ def push_image(ctx, target="ceshi", tag=""):
 
 @task(help={"target": "target name: ceshi", "tag": "image tag already present locally or in ACR"})
 def deploy(ctx, target="ceshi", tag=""):
-    """Blue-green deploy partner-api from an image tag."""
+    """Blue-green deploy partner-api from an image tag, including first systemd migration."""
     tag = _validate_arg("tag", tag)
     cfg = _config(target)
     c = _connect(cfg)
@@ -388,6 +425,7 @@ ENV_FILE={_q(str(cfg['env_file']))}
 APP_DIR={_q(str(cfg['app_dir']))}
 LOG_DIR={_q(str(cfg['log_dir']))}
 DATA_DIR={_q(str(cfg['data_dir']))}
+CONFIG_DIR={_q(str(cfg['config_dir']))}
 NGINX_CONF={_q(str(cfg['nginx_conf']))}
 HEALTH_PATH={_q(str(cfg['health_path']))}
 CONTAINER_PORT={int(cfg['container_port'])}
@@ -396,24 +434,36 @@ GREEN_PORT={int(cfg['green_port'])}
 MEM={_q(str(cfg['memory']))}
 CPUS={_q(str(cfg['cpus']))}
 test -f "$ENV_FILE"
+test -d "$CONFIG_DIR"
 test -f "$NGINX_CONF"
 mkdir -p "$APP_DIR" "$LOG_DIR" "$DATA_DIR"
+UPSTREAM_PORT="$(awk '
+  /upstream[[:space:]]+tracenexbiz_backend[[:space:]]*{{/ {{ flag=1; next }}
+  flag && /}}/ {{ flag=0 }}
+  flag && match($0, /server[[:space:]]+127\\.0\\.0\\.1:([0-9]+)/, m) {{ print m[1]; exit }}
+' "$NGINX_CONF")"
 if podman ps --format '{{{{.Names}}}}' | grep -qx tracenexbiz-blue; then
   CUR=blue; CUR_PORT=$BLUE_PORT; NEXT=green; NEXT_PORT=$GREEN_PORT
 elif podman ps --format '{{{{.Names}}}}' | grep -qx tracenexbiz-green; then
   CUR=green; CUR_PORT=$GREEN_PORT; NEXT=blue; NEXT_PORT=$BLUE_PORT
+elif systemctl is-active --quiet tracenexbiz.service; then
+  CUR=systemd; CUR_PORT="${{UPSTREAM_PORT:-$BLUE_PORT}}"
+  if [ "$CUR_PORT" = "$BLUE_PORT" ]; then NEXT=green; NEXT_PORT=$GREEN_PORT; else NEXT=blue; NEXT_PORT=$BLUE_PORT; fi
 else
-  CUR=none; CUR_PORT=0; NEXT=blue; NEXT_PORT=$BLUE_PORT
+  CUR=none; CUR_PORT="${{UPSTREAM_PORT:-0}}"
+  if [ "$CUR_PORT" = "$BLUE_PORT" ]; then NEXT=green; NEXT_PORT=$GREEN_PORT; else NEXT=blue; NEXT_PORT=$BLUE_PORT; fi
 fi
 echo "current=$CUR port=$CUR_PORT next=$NEXT port=$NEXT_PORT image=$IMAGE"
 podman pull "$IMAGE" || podman image exists "$IMAGE"
 podman rm -f "tracenexbiz-$NEXT" 2>/dev/null || true
 podman run -d --name "tracenexbiz-$NEXT" \\
   --restart=unless-stopped \\
-  -p "127.0.0.1:$NEXT_PORT:$CONTAINER_PORT" \\
-  -v "$LOG_DIR:/app/logs:Z" \\
-  -v "$DATA_DIR:/data:Z" \\
+  --network host \\
+  -v "$CONFIG_DIR:$CONFIG_DIR:ro" \\
+  -v "$LOG_DIR:/app/logs" \\
+  -v "$DATA_DIR:/data" \\
   --env-file "$ENV_FILE" \\
+  --env "HTTP_ADDR=127.0.0.1:$NEXT_PORT" \\
   --log-driver=k8s-file \\
   --log-opt max-size=100m --log-opt max-file=5 \\
   --memory="$MEM" --memory-swap="$MEM" \\
@@ -430,18 +480,67 @@ for i in $(seq 1 60); do
     exit 1
   fi
 done
-if [ "$CUR" != "none" ]; then
-  sed -i -E "s|(server[[:space:]]+127\\.0\\.0\\.1:)$CUR_PORT([[:space:];])|\\1$NEXT_PORT\\2|" "$NGINX_CONF"
+if [ "$CUR_PORT" != "$NEXT_PORT" ]; then
+  cp -a "$NGINX_CONF" "$NGINX_CONF.bak.$(date +%Y%m%d%H%M%S).pre-tnbiz-bluegreen"
+  sed -i -E "/upstream[[:space:]]+tracenexbiz_backend[[:space:]]*\\{{/,/\\}}/s|(server[[:space:]]+127\\.0\\.0\\.1:)[0-9]+([[:space:];])|\\1$NEXT_PORT\\2|" "$NGINX_CONF"
   nginx -t
   systemctl reload nginx
-else
-  echo "first deploy: skipping nginx upstream switch"
 fi
-if [ "$CUR" != "none" ]; then
+if [ "$CUR" = "blue" ] || [ "$CUR" = "green" ]; then
   sleep 15
   podman stop -t 30 "tracenexbiz-$CUR" || true
+elif [ "$CUR" = "systemd" ]; then
+  sleep 15
+  systemctl disable --now tracenexbiz.service || true
 fi
 echo "$(date -u +%F-%T) deploy $IMAGE: $CUR -> $NEXT (port $NEXT_PORT)" >> "$APP_DIR/deploy-log.md"
+"""
+    _run(c, f"flock {_q(DEPLOY_LOCK)} -c {_q(deploy_script)}")
+
+
+@task(help={"target": "target name: ceshi", "tag": "image tag already present locally or in ACR"})
+def deploy_poller(ctx, target="ceshi", tag=""):
+    """Roll out outbox-poller from the same image used by partner-api."""
+    tag = _validate_arg("tag", tag)
+    cfg = _config(target)
+    c = _connect(cfg)
+    image = _image(cfg, tag)
+    deploy_script = f"""
+set -euo pipefail
+IMAGE={_q(image)}
+ENV_FILE={_q(str(cfg['env_file']))}
+APP_DIR={_q(str(cfg['app_dir']))}
+LOG_DIR={_q(str(cfg['log_dir']))}
+DATA_DIR={_q(str(cfg['data_dir']))}
+CONFIG_DIR={_q(str(cfg['config_dir']))}
+MEM={_q(str(cfg['memory']))}
+CPUS={_q(str(cfg['cpus']))}
+NAME=tracenexbiz-outbox-poller
+NEXT=tracenexbiz-outbox-poller-next
+test -f "$ENV_FILE"
+test -d "$CONFIG_DIR"
+mkdir -p "$APP_DIR" "$LOG_DIR" "$DATA_DIR"
+podman pull "$IMAGE" || podman image exists "$IMAGE"
+podman rm -f "$NEXT" 2>/dev/null || true
+podman run -d --name "$NEXT" \\
+  --restart=unless-stopped \\
+  --network host \\
+  -v "$CONFIG_DIR:$CONFIG_DIR:ro" \\
+  -v "$LOG_DIR:/app/logs" \\
+  -v "$DATA_DIR:/data" \\
+  --env-file "$ENV_FILE" \\
+  --log-driver=k8s-file \\
+  --log-opt max-size=100m --log-opt max-file=5 \\
+  --memory="$MEM" --memory-swap="$MEM" \\
+  --cpus="$CPUS" \\
+  --entrypoint /usr/local/bin/outbox-poller \\
+  "$IMAGE"
+sleep 5
+podman ps --format '{{{{.Names}}}}' | grep -qx "$NEXT"
+systemctl disable --now tracenexbiz-outbox-poller.service 2>/dev/null || true
+podman rm -f "$NAME" 2>/dev/null || true
+podman rename "$NEXT" "$NAME"
+echo "$(date -u +%F-%T) deploy-poller $IMAGE" >> "$APP_DIR/deploy-log.md"
 """
     _run(c, f"flock {_q(DEPLOY_LOCK)} -c {_q(deploy_script)}")
 
@@ -464,6 +563,7 @@ def release(ctx, target="ceshi", tag="", ref="", skip_build=False, skip_push=Fal
     if not skip_push:
         push_image(ctx, target=target, tag=tag)
     deploy(ctx, target=target, tag=tag)
+    deploy_poller(ctx, target=target, tag=tag)
     health(ctx, target=target)
 
 
@@ -483,6 +583,7 @@ def release_local(ctx, target="ceshi", tag="", skip_build=False, skip_push=False
     if not skip_push:
         push_image(ctx, target=target, tag=tag)
     deploy(ctx, target=target, tag=tag)
+    deploy_poller(ctx, target=target, tag=tag)
     health(ctx, target=target)
 
 
@@ -490,6 +591,7 @@ def release_local(ctx, target="ceshi", tag="", skip_build=False, skip_push=False
 def rollback(ctx, target="ceshi", tag=""):
     """Rollback by deploying an older image tag."""
     deploy(ctx, target=target, tag=tag)
+    deploy_poller(ctx, target=target, tag=tag)
     health(ctx, target=target)
 
 
@@ -498,7 +600,7 @@ def status(ctx, target="ceshi"):
     """Show git ref, containers, nginx status, and disk usage."""
     cfg = _config(target)
     c = _connect(cfg)
-    _run(c, f"cd {_q(str(cfg['src_dir']))} && git log -1 --oneline", warn=True)
+    _run(c, f"test -d {_q(str(cfg['src_dir']))}/.git && cd {_q(str(cfg['src_dir']))} && git log -1 --oneline || true", warn=True)
     _run(c, "podman ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' | grep -E 'NAMES|tracenexbiz' || true", warn=True)
     _run(c, "systemctl is-active nginx || true", warn=True)
     _run(c, f"df -h {_q(str(cfg['app_dir']))} /var/log/nginx 2>/dev/null | awk 'NR>1'", warn=True)
