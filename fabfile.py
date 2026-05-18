@@ -55,7 +55,7 @@ TARGETS = {
         "app_dir": "/opt/tracenexbiz",
         "src_dir": "/root/TraceNexBiz",
         "build_dir": "/tmp/tracenexbiz-build",
-        "registry": "transnext-acr-ee-registry-vpc.cn-hangzhou.cr.aliyuncs.com",
+        "registry": "panelverse-prod-acr-registry-vpc.cn-chengdu.cr.aliyuncs.com",
         "namespace": "tracenexbiz",
         "repo": "partner-api",
         "repo_url": "git@github.com:seraph0017/TraceNexBiz.git",
